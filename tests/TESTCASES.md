@@ -123,3 +123,15 @@
 | TC-E02 | 单用例 / 换模型对比 | manual | `--case arith_tool --model glm-5.3` | 报告标注模型名，可比对 |
 | TC-E03 | 网络异常单用例重试不崩 | auto | （2026-09-22 真实触发过） | 该用例重试一次，仍败记 FAIL 继续跑 |
 | TC-E04 | plan/research 纳入回归 | auto | 用例 plan_mode / research_fanout | events_contains 断言生效 |
+
+## M12 文件导入/下载（Web）
+
+| ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
+|---|---|---|---|---|
+| TC-F01 | 上传(中文文件名)到 uploads/ | auto | test_files | 返回相对路径，文件落盘 |
+| TC-F02 | 重名自动加序号 | auto | 同上 | 导入测试(1).txt |
+| TC-F03 | 目录浏览可见/隐藏敏感文件 | auto | 同上 | config.json 不出现在列表 |
+| TC-F04 | 下载内容与上传一致 | auto | 同上 | 字节一致，带 filename 头 |
+| TC-F05 | config.json 拒绝下载(403) | auto | 同上 | 敏感文件保护 |
+| TC-F06 | 下载/上传路径穿越拦截(400) | auto | 同上 | ../ 与文件名路径成分均被防 |
+| TC-F07 | UI 导入→引用→生成→下载 全链路 | manual | Web 导入一个 xlsx，消息"用 run_python 读 uploads/xx.xlsx 前几行"，让它生成报告 md，文件面板点击下载 | 全链路闭环 |

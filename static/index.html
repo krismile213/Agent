@@ -27,6 +27,19 @@
   .sess:hover { background: var(--bg); }
   .sess.on { background: #eff6ff; color: var(--accent); font-weight: 600; }
   .sess .t { color: var(--muted); font-size: 11px; }
+  #files { max-height: 26vh; overflow-y: auto; font-size: 12px;
+           border-top: 1px solid var(--line); padding-top: 6px; }
+  .fhead { display: flex; justify-content: space-between; align-items: center;
+           font-size: 12px; color: var(--muted); padding: 8px 0 4px;
+           border-top: 1px solid var(--line); }
+  .fhead button { font-size: 11px; padding: 2px 8px; border: 1px solid var(--accent);
+                  color: var(--accent); background: #fff; border-radius: 6px; cursor: pointer; }
+  .frow { display: flex; justify-content: space-between; gap: 6px; padding: 3px 4px;
+          border-radius: 4px; cursor: pointer; overflow: hidden; }
+  .frow:hover { background: var(--bg); }
+  .frow.d { color: var(--accent); }
+  .frow .t { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+  .frow .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   label.chk { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
   #meta { font-size: 11px; color: var(--muted); line-height: 1.6; }
   /* 主区 */
@@ -85,6 +98,9 @@
     <div class="sub">通用工作区助手</div>
     <button id="newbtn">＋ 新会话</button>
     <div id="sessions"></div>
+    <div class="fhead"><span>文件(沙箱)</span><button id="upbtn">＋导入</button></div>
+    <input type="file" id="fileinp" multiple style="display:none">
+    <div id="files"></div>
     <label class="chk"><input type="checkbox" id="reflect"> 任务后自检反思</label>
     <label class="chk"><input type="checkbox" id="planmode"> 先出计划再执行</label>
     <label class="chk"><input type="checkbox" id="stepmode"> 计划分步执行</label>
@@ -228,9 +244,57 @@ function handle(ev) {
     case "task_end":
       setRunning(false, ev.usage);
       loadSessions();
+      loadFiles();
       break;
   }
 }
+
+/* ---------- 文件面板 ---------- */
+let fpath = ".";
+const parentOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ".";
+
+async function loadFiles() {
+  try {
+    const r = await fetch(`/api/files?path=${encodeURIComponent(fpath)}`);
+    const d = await r.json();
+    if (!r.ok) { $("files").innerHTML = `<div class="frow t">${esc(d.error || "读取失败")}</div>`; return; }
+    let html = fpath !== "." ? `<div class="frow d" data-d="..">📁 .. (${esc(fpath)})</div>` : "";
+    for (const it of (d.items || [])) {
+      html += it.is_dir
+        ? `<div class="frow d" data-d="${esc(it.name)}"><span class="n">📁 ${esc(it.name)}</span></div>`
+        : `<div class="frow" data-f="${esc(it.path)}" title="点击下载 ${esc(it.mtime)}">
+             <span class="n">📄 ${esc(it.name)}</span><span class="t">${(it.size / 1024).toFixed(1)}K</span></div>`;
+    }
+    $("files").innerHTML = html || "<div class='frow t'>(空)</div>";
+    $("files").querySelectorAll("[data-d]").forEach((el) => el.onclick = () => {
+      fpath = el.dataset.d === ".." ? parentOf(fpath)
+            : (fpath === "." ? el.dataset.d : fpath + "/" + el.dataset.d);
+      loadFiles();
+    });
+    $("files").querySelectorAll("[data-f]").forEach((el) => el.onclick = () => {
+      const a = document.createElement("a");
+      a.href = "/api/files/download?path=" + encodeURIComponent(el.dataset.f);
+      a.download = "";
+      document.body.appendChild(a); a.click(); a.remove();
+    });
+  } catch (e) { /* 面板失败不影响聊天 */ }
+}
+
+$("upbtn").onclick = () => $("fileinp").click();
+$("fileinp").onchange = async () => {
+  for (const f of $("fileinp").files) {
+    notice(`⬆ 导入中: ${f.name}`);
+    const fd = new FormData();
+    fd.append("file", f);
+    const r = await fetch("/api/files/upload", { method: "POST", body: fd });
+    const j = await r.json().catch(() => ({}));
+    notice(r.ok ? `✅ 已导入 ${j.path} (${j.size}B) — 可在消息里用该路径引用`
+                : (`❌ 导入失败: ` + (j.error || r.status)));
+  }
+  $("fileinp").value = "";
+  fpath = "uploads";
+  loadFiles();
+};
 
 /* ---------- 会话 ---------- */
 function connect() {
@@ -255,6 +319,7 @@ async function openSession(name) {
   setRunning(r.running, r.usage);
   connect();
   loadSessions();
+  loadFiles();
 }
 function newSession() {
   const n = "web_" + new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 14);

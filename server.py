@@ -25,9 +25,10 @@ import uuid
 import webbrowser
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -38,6 +39,7 @@ CFG: dict = {}
 SESS: dict[str, "SessionState"] = {}
 PENDING: dict[str, "PendingReq"] = {}
 EVLOG_MAX = 500  # 每会话保留的最近事件数(SSE断线重放窗口)
+MAX_UPLOAD = 50 * 1024 * 1024  # 上传大小上限50MB
 
 
 class PendingReq:
@@ -295,6 +297,79 @@ async def approve(body: ApproveBody):
     if s:
         s.send("permission_resolved", {"id": body.id, "approved": body.approve})
     return {"ok": True}
+
+
+# ---------- 文件能力: 导入 / 浏览 / 下载 (全部锁在沙箱内) ----------
+
+def _sensitive(p: Path) -> bool:
+    low = p.name.lower()
+    return (p.name == "config.json" or low.endswith(".env")
+            or "credential" in low or "secret" in low or "password" in low)
+
+
+@app.post("/api/files/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """导入文件到沙箱 uploads/ (重名自动加序号), 之后在消息里用相对路径引用."""
+    data = await file.read()
+    if len(data) > MAX_UPLOAD:
+        return JSONResponse({"error": f"文件超上限({MAX_UPLOAD // 1024 // 1024}MB)"}, 413)
+    fname = Path(file.filename or "upload.bin").name  # 去掉任何路径成分
+    if not fname or fname.startswith("."):
+        fname = "upload_" + datetime.now().strftime("%H%M%S") + ".bin"
+    d = core.safe_path("uploads")
+    d.mkdir(parents=True, exist_ok=True)
+    target = d / fname
+    i = 1
+    while target.exists():
+        target = d / f"{target.stem}({i}){target.suffix}"
+        i += 1
+    target.write_bytes(data)
+    relp = target.relative_to(core.ROOT).as_posix()
+    return {"ok": True, "path": relp, "size": len(data)}
+
+
+@app.get("/api/files")
+async def list_files(path: str = "."):
+    try:
+        p = core.safe_path(path)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, 400)
+    if not p.is_dir():
+        return JSONResponse({"error": f"不是目录: {path}"}, 400)
+    items = []
+    try:
+        entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, 400)
+    for ch in entries[:200]:
+        if ch.name in core.EXCLUDE_DIRS:
+            continue
+        if ch.is_dir():
+            items.append({"name": ch.name,
+                          "path": ch.relative_to(core.ROOT).as_posix(),
+                          "is_dir": True, "size": 0, "mtime": ""})
+        else:
+            if _sensitive(ch):
+                continue
+            st = ch.stat()
+            items.append({"name": ch.name,
+                          "path": ch.relative_to(core.ROOT).as_posix(),
+                          "is_dir": False, "size": st.st_size,
+                          "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M")})
+    return {"items": items}
+
+
+@app.get("/api/files/download")
+async def download_file(path: str):
+    try:
+        p = core.safe_path(path)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, 400)
+    if not p.is_file():
+        return JSONResponse({"error": f"文件不存在: {path}"}, 404)
+    if _sensitive(p):
+        return JSONResponse({"error": "该文件含敏感信息, 禁止下载"}, 403)
+    return FileResponse(p, filename=p.name)
 
 
 @app.get("/api/events")

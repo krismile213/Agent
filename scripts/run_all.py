@@ -28,6 +28,7 @@ FAST = [
     ("高级能力单测", [sys.executable, "scripts/test_advanced.py", "--unit-only"]),
 ]
 FULL_EXTRA = [
+    ("文件接口", [sys.executable, "scripts/test_files.py"]),
     ("MCP双向", [sys.executable, "scripts/test_mcp.py"]),
     ("Web冒烟(含审批)", [sys.executable, "scripts/smoke_web.py"]),
     ("多轮增强E2E", [sys.executable, "scripts/test_upgrade.py", "--e2e-only"]),

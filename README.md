@@ -33,7 +33,7 @@ python server.py --no-plugins --no-open
 python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
 ```
 
-网页功能：多轮对话、工具调用/结果实时流式展示（SSE）、**写操作审批收件箱**（diff 预览 + 允许/本会话总允许/拒绝）、会话侧栏（历史会话恢复）、反思开关、token 用量统计。
+网页功能：多轮对话、工具调用/结果实时流式展示（SSE）、**写操作审批收件箱**（diff 预览 + 允许/本会话总允许/拒绝）、**文件面板**（导入文件到沙箱 `uploads/`、目录浏览、点击下载 AI 生成的文件；敏感文件拒下载）、会话侧栏（历史会话恢复）、反思/计划/分步执行开关、任务停止与转向、token 用量统计。导入的文件用相对路径在消息里引用即可（如"分析 uploads/xx.xlsx"——文本文件直接读，xlsx 走 run_python/pandas）。
 
 架构：**一个引擎，多个前端** —— `agentcore.py`（事件回调驱动，前端无关）← CLI 适配器 `mini_agent.py`（input 确认） / Web 适配器 `server.py`（引擎跑工作线程，事件经 `call_soon_threadsafe` 推给 SSE；审批时引擎线程阻塞在 `threading.Event` 上等浏览器 POST `/api/approve`）。以后加钉钉机器人就是第三个适配器。
 
