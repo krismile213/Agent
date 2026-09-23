@@ -90,6 +90,25 @@ class WebPlanConfirmer:
         return req.approved
 
 
+class WebStepConfirmer:
+    """分步执行的网页审批: 每步完成后 允许=继续 / 拒绝=停止.
+    (修改指令走"拒绝→发新消息转向", 文本注入留待后续)"""
+
+    def __init__(self, sess: "SessionState"):
+        self.sess = sess
+
+    def __call__(self, i: int, n: int, step_text: str, last_answer: str):
+        req = PendingReq(f"计划步骤 {i}/{n}", f"已完成: {step_text[:500]}\n\n"
+                                              f"允许=继续第{i + 1}步 / 拒绝=停止(可发新消息转向)")
+        req.session = self.sess.name
+        PENDING[req.id] = req
+        self.sess.emit_threadsafe("step_request",
+                                  {"id": req.id, "step": i, "total": n,
+                                   "text": step_text[:500]})
+        req.ev.wait()
+        return ("continue", "") if req.approved else ("stop", "")
+
+
 class SessionState:
     def __init__(self, name: str):
         self.name = name
@@ -138,6 +157,7 @@ class ChatBody(BaseModel):
     message: str
     reflect: bool = False
     plan: bool = False
+    stepwise: bool = False
 
 
 class ApproveBody(BaseModel):
@@ -223,7 +243,10 @@ async def chat(body: ChatBody):
                 answer = core.plan_and_run(s.client, REG, WebPolicy(s),
                                            WebPlanConfirmer(s), s.transcript,
                                            s.history, body.message, CFG,
-                                           emit=s.emit_threadsafe, cancel=s.cancel)
+                                           emit=s.emit_threadsafe, cancel=s.cancel,
+                                           stepwise=body.stepwise,
+                                           step_confirm=WebStepConfirmer(s)
+                                           if body.stepwise else None)
             else:
                 answer = core.run_task(s.client, REG, WebPolicy(s), s.transcript,
                                        s.history, body.message, CFG,

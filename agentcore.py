@@ -415,14 +415,23 @@ def build_registry() -> Registry:
          "required": ["content"]}, "write", t_save_memory))
     r.register(Tool(
         "research",
-        "并行派出最多4个只读子agent分头调查(每个独立上下文互不污染), 返回各自结论. "
-        "适合: 多文件/多方向的探索、互不依赖的并行查证. tasks为任务数组. "
-        "子agent只有只读工具, 需要写操作的任务留给你自己执行.",
+        "并行派出最多4个只读子agent分头调查(独立上下文互不污染), 返回各自结论. "
+        "tasks 元素为字符串, 或 {task, role, tools} 对象 —— role指定专属角色(如'代码审计员'), "
+        "tools为只读工具白名单. verify=true 追加核查员逐条验证结论依据. "
+        "适合: 多文件/多方向探索、互不依赖的并行查证. 需要写操作的任务留给你自己执行.",
         {"type": "object", "properties": {
-            "tasks": {"type": "array", "items": {"type": "string"},
-                      "description": "子任务列表, 最多4个"},
+            "tasks": {"type": "array", "items": {"anyOf": [
+                {"type": "string"},
+                {"type": "object", "properties": {
+                    "task": {"type": "string", "description": "子任务描述"},
+                    "role": {"type": "string", "description": "专属角色设定, 注入子agent系统提示"},
+                    "tools": {"type": "array", "items": {"type": "string"},
+                              "description": "只读工具白名单(可选, 进一步收窄)"}},
+                 "required": ["task"]}]}},
             "max_turns": {"type": "integer", "minimum": 1,
-                          "description": "每个子agent最大轮数, 默认10"}},
+                          "description": "每个子agent最大轮数, 默认10"},
+            "verify": {"type": "boolean",
+                       "description": "追加核查员子agent逐条验证结论, 默认false"}},
          "required": ["tasks"]}, "read", t_research))
     return r
 
@@ -507,15 +516,24 @@ SUBAGENT_SYS = """你是子agent, 由主agent派出独立完成一项调查子�
 
 
 def run_subagent(client: LLMClient, registry: Registry, task: str, cfg: dict,
-                 name: str = "sub") -> str:
+                 name: str = "sub", role: str = "", tools: list | None = None) -> str:
     """独立上下文的只读子agent: 自己的会话/系统提示/注册表副本, 结论返回主agent.
-    上下文隔离 —— 子agent的中间过程不占用主agent的上下文窗口."""
+    上下文隔离 —— 子agent的中间过程不占用主agent的上下文窗口.
+    role: 专属角色设定(注入其系统提示); tools: 只读工具白名单(进一步收窄)."""
     ro = Registry()
     for t in registry._tools.values():
-        if t.level == "read":
-            ro.register(t)
+        if t.level != "read":
+            continue
+        if tools and t.name not in tools:
+            continue
+        ro.register(t)
+    if tools and not ro.names():
+        return (f"[子agent错误] 工具白名单 {tools} 与可用只读工具"
+                f"(需含插件的只读工具)无交集")
     sp = (SUBAGENT_SYS.format(root=ROOT, today=datetime.now().strftime("%Y-%m-%d"))
           + _memory_block())
+    if role:
+        sp += f"\n# 角色(主agent指定)\n{role}\n请以该角色的专业视角完成任务。"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     tr = Transcript(HERE / "sessions" / f"sub_{ts}_{name}.jsonl")
     history = [{"role": "system", "content": sp}]
@@ -525,41 +543,73 @@ def run_subagent(client: LLMClient, registry: Registry, task: str, cfg: dict,
     return answer
 
 
-def t_research(tasks, max_turns: int = 10) -> str:
+def t_research(tasks, max_turns: int = 10, verify: bool = False) -> str:
     """并行扇出: 每个任务一个独立只读子agent(线程), 汇总各自结论.
+    tasks 元素可为字符串, 或 {task, role, tools} 对象(专属角色+工具白名单).
+    verify=True 时追加一个核查员子agent逐条验证结论依据.
     硬上限4个任务/每个15轮, 防失控烧token."""
-    if isinstance(tasks, str):
+    if isinstance(tasks, (str, dict)):
         tasks = [tasks]
     if not isinstance(tasks, list) or not tasks:
-        return "[参数错误] tasks 需为任务字符串数组"
-    tasks = [str(t) for t in tasks[:4]]
+        return "[参数错误] tasks 需为任务数组(字符串或{task,role,tools}对象)"
+    norm = []
+    for item in tasks[:4]:
+        if isinstance(item, str):
+            norm.append({"task": item, "role": "", "tools": None})
+        elif isinstance(item, dict):
+            t = str(item.get("task") or item.get("任务") or "").strip()
+            if not t:
+                continue
+            tools = item.get("tools") or None
+            norm.append({"task": t, "role": str(item.get("role") or ""),
+                         "tools": [str(x) for x in tools] if tools else None})
+    if not norm:
+        return "[参数错误] 未解析到有效任务"
     cfg = load_config()
     if not cfg.get("api_key"):
         return "[工具错误] 未配置 API Key"
     sub_cfg = dict(cfg, max_turns=max(1, min(int(max_turns), 15)))
     reg = _REG_REF if _REG_REF is not None else build_registry()
-    results, errs = [""] * len(tasks), [""] * len(tasks)
+    results, errs = [""] * len(norm), [""] * len(norm)
 
-    def _work(i: int, t: str):
+    def _work(i: int, spec: dict):
         try:
             client = LLMClient(sub_cfg)  # 每个子agent独立client: 线程安全+用量隔离
-            results[i] = run_subagent(client, reg, t, sub_cfg, name=f"t{i + 1}")
+            results[i] = run_subagent(client, reg, spec["task"], sub_cfg,
+                                      name=f"t{i + 1}", role=spec["role"],
+                                      tools=spec["tools"])
         except Exception as e:
             errs[i] = f"{type(e).__name__}: {e}"
 
-    threads = [threading.Thread(target=_work, args=(i, t), daemon=True,
+    threads = [threading.Thread(target=_work, args=(i, spec), daemon=True,
                                 name=f"subagent-{i + 1}")
-               for i, t in enumerate(tasks)]
+               for i, spec in enumerate(norm)]
     for th in threads:
         th.start()
     for th in threads:
         th.join()
     parts = []
-    for i, t in enumerate(tasks):
+    for i, spec in enumerate(norm):
         body = results[i] if results[i] else f"(失败: {errs[i] or '未知错误'})"
-        log(f"[research] 子任务{i + 1} 完成: {t[:50]}")
-        parts.append(f"[子任务{i + 1}] {t}\n{clip(body, 2200)}")
-    return clip("\n\n".join(parts), 9_000)
+        log(f"[research] 子任务{i + 1} 完成: {spec['task'][:50]}")
+        head = f"[子任务{i + 1}] {spec['task']}"
+        if spec["role"]:
+            head += f" (角色: {spec['role'][:30]})"
+        parts.append(head + "\n" + clip(body, 2200))
+    if verify:
+        pairs = "\n\n".join(f"[问题{i + 1}] {s['task']}\n[结论] {clip(r, 1200)}"
+                            for i, (s, r) in enumerate(zip(norm, results)))
+        vtask = ("以下是对若干调查问题的结论, 请逐条核查: 关键事实/数字是否有依据"
+                 "(用工具抽查原始来源), 各结论之间是否矛盾. "
+                 "输出: 每条给出 通过/存疑(原因), 最后一行给总结论。\n\n" + pairs)
+        try:
+            vclient = LLMClient(sub_cfg)
+            verdict = run_subagent(vclient, reg, vtask, sub_cfg, name="verify",
+                                   role="核查员: 只信工具输出, 不放过无依据的数字")
+            parts.append(f"[核查]\n{clip(verdict, 2500)}")
+        except Exception as e:
+            parts.append(f"[核查] (核查员执行失败: {e})")
+    return clip("\n\n".join(parts), 10_000)
 
 
 # ============================================================
@@ -858,9 +908,13 @@ def propose_plan(client: LLMClient, registry: Registry, task: str,
 
 def plan_and_run(client: LLMClient, registry: Registry, policy,
                  confirm, transcript: Transcript, history: list, task: str,
-                 cfg: dict, emit=None, cancel=None) -> str:
-    """计划模式: 生成计划 → confirm(plan)人工批准 → 按计划执行.
-    confirm(plan_text)->bool 由适配器提供(CLI=input确认, Web=审批收件箱)."""
+                 cfg: dict, emit=None, cancel=None, stepwise: bool = False,
+                 step_confirm=None) -> str:
+    """计划模式: 生成计划 → confirm(plan)人工批准 → 执行.
+    confirm(plan_text)->bool 由适配器提供(CLI=input确认, Web=审批收件箱).
+    stepwise=True 分步执行: 计划按编号拆步, 每步执行完发 step_done 事件并调
+    step_confirm(i, n, step_text, answer) -> ('continue'|'stop', 修改指令文本),
+    修改指令会注入历史影响后续步骤 —— 这就是计划中途转向."""
     emit = emit or (lambda kind, data: None)
     if cancel is not None and cancel.is_set():
         return run_task(client, registry, policy, transcript, history,
@@ -879,9 +933,46 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
         transcript.log("message", {"msg": history[-1]})
         return "[计划被用户否决] 任务未执行。"
     emit("plan_approved", {})
+
+    steps = _split_plan_steps(plan) if stepwise else []
+    if stepwise and len(steps) >= 2:
+        emit("steps", {"steps": steps})
+        final = ""
+        for i, st in enumerate(steps, 1):
+            if cancel is not None and cancel.is_set():
+                return (f"[计划在第{i}步前被停止] 已完成 {i - 1}/{len(steps)} 步.")
+            ans = run_task(client, registry, policy, transcript, history,
+                           f"[计划执行 {i}/{len(steps)}] 原任务: {task[:200]}\n"
+                           f"本步只做: {st}\n(完成本步即停, 后续步骤由用户决定是否继续)",
+                           cfg, emit=emit, cancel=cancel)
+            final = ans
+            emit("step_done", {"step": i, "total": len(steps), "text": st})
+            if i < len(steps) and step_confirm is not None:
+                action, steer = step_confirm(i, len(steps), st, ans or "")
+                if steer:
+                    history.append({"role": "user",
+                                    "content": "[计划修改指令]用户对后续步骤的要求:\n"
+                                               + steer})
+                    transcript.log("message", {"msg": history[-1]})
+                if action == "stop":
+                    emit("plan_stopped", {"at": i, "total": len(steps)})
+                    return (f"[计划在第{i}步后按用户要求停止] 已完成 {i}/{len(steps)} 步.")
+        return final or "(计划执行完毕)"
+
     task2 = task + "\n\n[已批准的执行计划, 请严格按计划执行]\n" + plan
     return run_task(client, registry, policy, transcript, history,
                     task2, cfg, emit=emit, cancel=cancel)
+
+
+def _split_plan_steps(plan: str) -> list:
+    """从计划文本中拆出编号步骤行("1. xxx"), 最多12步."""
+    steps = []
+    for ln in plan.splitlines():
+        s = ln.strip()
+        m = re.match(r"^(\d{1,2})[\.、\)．]\s*(.+)$", s)
+        if m and not s.startswith("预计"):
+            steps.append(m.group(2).strip())
+    return steps[:12]
 
 
 # ============================================================

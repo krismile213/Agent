@@ -50,8 +50,8 @@ python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
 | **反思** | `reflect()`（CLI `--reflect` / Web 勾选） | self-check / critique |
 | **用量统计** | `LLMClient.usage` | cost awareness |
 | **跨会话记忆** | `MEMORY.md` + `save_memory` 工具 | 长期记忆（LLM 可沉淀要点，每次启动注入） |
-| **子agent扇出** | `run_subagent()` + `research` 工具 | Claude Code 的 Explore：并行调查、只读隔离、独立上下文互不污染（线程并行，硬上限 4 任务×15 轮） |
-| **计划模式** | `plan_and_run()`（CLI `--plan` / Web 勾选"先出计划"） | plan-then-execute：先出计划 → 审批收件箱批准 → 严格按计划执行 |
+| **子agent扇出** | `run_subagent()` + `research` 工具 | Claude Code 的 Explore：并行调查、只读隔离、独立上下文互不污染（线程并行，硬上限 4 任务×15 轮）；**专属角色**（`role` 注入子agent系统提示）+ **工具白名单**（`tools`）；**verify 核查员**逐条验证结论依据 |
+| **计划模式** | `plan_and_run()`（CLI `--plan` / Web 勾选"先出计划"） | plan-then-execute：先出计划 → 审批收件箱批准 → 严格按计划执行；**分步执行**（CLI `--stepwise` / Web 勾选"分步执行"）：每步之间暂停，可继续/停止/输入修改指令（中途转向） |
 | **中断加固** | `Transcript._patch_dangling()` | 被中断的会话自动补合成工具结果，`--resume` 不再报错 |
 | **停止/转向** | `run_task(cancel=...)` + Web 停止按钮 + `/api/stop` | 任务级 interrupt，停止后立即发新指令即 steering |
 | **SSE 断线补发** | 事件 seq 编号 + `Last-Event-ID` 重放（每会话保留最近 500 条） | 刷新/断网不丢事件流 |
@@ -139,7 +139,7 @@ python dingtalk_push.py --title "测试" --text "hello" --dry   # 推送工具(d
 3. **人工干预增强**：~~任务停止/转向~~ ✅；~~计划审批~~ ✅ 已随计划模式交付；待做：批量审批、外发双确认、任务中途追加指令
 4. **reflection 例行化**：~~反思结论落库~~ ✅ 已升级为闭环（`reflect_and_fix`：反思发现具体问题 → 带工具自动修正一轮，有界不递归）；~~金标准评测集回归~~ ✅ 已交付（`eval/run_eval.py` + 12 用例，全绿）；待做：评测集扩容、失败模式统计
 5. **工具生态**：~~插件 API → MCP 化（同一函数两种暴露）~~ ✅ 已交付（`mcp_server.py` 手写协议双向暴露 + `mcp_bridge.py` 接入外部 server，测试 9/9）；"工具市场"待做
-7. **多agent协作**：~~子agent扇出~~ ✅（research 工具，并行只读调查）+ ~~计划模式~~ ✅（plan_and_run）；待做：专属角色子agent（人设/工具白名单）、子agent结果自动校验
+7. **多agent协作**：~~子agent扇出~~ ✅ + ~~计划模式~~ ✅ + ~~专属角色子agent(角色/工具白名单)~~ ✅ + ~~结果自动核查(verify核查员)~~ ✅ + ~~计划分步执行与中途转向~~ ✅；待做：Web 端步骤级文本修改指令、子agent间协作(结果互引)
 6. **治理**：用量/成本预算、审计报表、多用户 RBAC；钉钉**入站机器人**（第三前端，Stream 模式收消息）待企业应用开通消息权限后接入——出站推送与定时晨检已交付（见上节）
 
 ## 学习练习建议

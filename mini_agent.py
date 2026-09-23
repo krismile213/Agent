@@ -77,6 +77,14 @@ def cli_emit(kind: str, data: dict):
         print("[计划] 已批准, 开始执行")
     elif kind == "plan_rejected":
         print(f"[计划] 未执行: {clip(str(data.get('plan', '')), 200)}")
+    elif kind == "steps":
+        print(f"[分步] 计划拆为 {len(data['steps'])} 步:")
+        for i, s in enumerate(data["steps"], 1):
+            print(f"  {i}. {s[:80]}")
+    elif kind == "step_done":
+        print(f"[步骤] {data['step']}/{data['total']} 完成: {clip(data['text'], 80)}")
+    elif kind == "plan_stopped":
+        print(f"[分步] 计划在第{data['at']}/{data['total']}步后停止")
     elif kind == "reflect":
         print(f"[反思] {clip(data['critique'], 800)}")
     elif kind == "fix_round":
@@ -107,6 +115,8 @@ def main():
     ap.add_argument("--reflect", action="store_true", help="每个任务完成后做一次自检反思")
     ap.add_argument("--plan", action="store_true",
                     help="计划模式: 先生成执行计划, 人工批准后再执行")
+    ap.add_argument("--stepwise", action="store_true",
+                    help="分步执行计划: 每步之间暂停, 可继续/停止/输入修改指令")
     ap.add_argument("--no-plugins", action="store_true", help="禁用全部插件(纯通用模式)")
     ap.add_argument("--selftest", action="store_true", help="离线自检(不需要API Key)")
     args = ap.parse_args()
@@ -147,12 +157,25 @@ def main():
             return True
         return input("  批准执行该计划? [y/n]: ").strip().lower() in ("y", "yes", "")
 
+    def step_confirm_cli(i: int, n: int, step_text: str, last_answer: str):
+        if args.yolo:
+            return "continue", ""
+        raw = input(f"\n  [步骤{i}/{n}完成] 回车=继续下一步 / s=停止"
+                    f" / 或直接输入对后续步骤的修改指令: ").strip()
+        if raw.lower() in ("s", "stop"):
+            return "stop", ""
+        if not raw:
+            return "continue", ""
+        return "continue", raw
+
     def run_with_reflect(task_text: str) -> str:
         start = len(history)
         if args.plan:
             answer = core.plan_and_run(client, registry, policy, confirm_plan,
                                        transcript, history, task_text, cfg,
-                                       emit=cli_emit)
+                                       emit=cli_emit,
+                                       stepwise=args.stepwise,
+                                       step_confirm=step_confirm_cli)
         else:
             answer = core.run_task(client, registry, policy, transcript, history,
                                    task_text, cfg, emit=cli_emit)

@@ -87,6 +87,7 @@
     <div id="sessions"></div>
     <label class="chk"><input type="checkbox" id="reflect"> 任务后自检反思</label>
     <label class="chk"><input type="checkbox" id="planmode"> 先出计划再执行</label>
+    <label class="chk"><input type="checkbox" id="stepmode"> 计划分步执行</label>
     <div id="meta"></div>
   </div>
   <div id="main">
@@ -207,6 +208,16 @@ function handle(ev) {
       break;
     case "plan_approved": notice("✅ 计划已批准, 开始执行"); hideApprove(); break;
     case "plan_rejected": notice("🚫 计划未执行"); hideApprove(); break;
+    case "steps":
+      notice(`📋 计划拆为 ${ev.steps.length} 步, 分步执行中`);
+      break;
+    case "step_done": notice(`✔ 步骤 ${ev.step}/${ev.total} 完成: ${ev.text.slice(0, 60)}`); break;
+    case "step_request":
+      pendingId = ev.id;
+      $("approve_pre").textContent = `【计划步骤 ${ev.step}/${ev.total} 已完成】${ev.text}\n\n允许=继续下一步 / 拒绝=停止(可发新消息转向)`;
+      $("approve").style.display = "block";
+      $("st_left").textContent = `⚠ 等待步骤确认 (${ev.step}/${ev.total})`;
+      break;
     case "cancelled": notice("⛔ 已按用户要求中断, 可输入新指令转向"); hideApprove(); break;
     case "reflect": addReflect(ev.critique); break;
     case "fix_round": notice("🔁 反思发现问题, 自动修正一轮"); break;
@@ -257,7 +268,7 @@ async function send() {
   $("msg").value = "";
   const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({session: cur, message: text, reflect: $("reflect").checked,
-                          plan: $("planmode").checked})});
+                          plan: $("planmode").checked, stepwise: $("stepmode").checked})});
   if (!r.ok) { const e = await r.json().catch(() => ({})); notice(e.error || "发送失败"); }
 }
 $("send").onclick = send;
