@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini_agent — 通用工作区助手</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea;
+    --text: #1f2328; --muted: #6b7280; --accent: #2563eb;
+    --user: #2563eb; --tool: #64748b; --warn: #b45309; --ok: #15803d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; display: flex; }
+  /* 侧栏 */
+  #side { width: 250px; background: var(--panel); border-right: 1px solid var(--line);
+          display: flex; flex-direction: column; padding: 14px; gap: 10px; }
+  #side h1 { font-size: 15px; margin: 0 0 4px; }
+  #side .sub { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  #newbtn { padding: 8px; border: 1px solid var(--accent); color: var(--accent);
+            background: #fff; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  #newbtn:hover { background: #eff6ff; }
+  #sessions { flex: 1; overflow-y: auto; }
+  .sess { padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
+          display: flex; justify-content: space-between; color: var(--text); }
+  .sess:hover { background: var(--bg); }
+  .sess.on { background: #eff6ff; color: var(--accent); font-weight: 600; }
+  .sess .t { color: var(--muted); font-size: 11px; }
+  label.chk { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  #meta { font-size: 11px; color: var(--muted); line-height: 1.6; }
+  /* 主区 */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #chat { flex: 1; overflow-y: auto; padding: 20px 26px; }
+  .row { margin: 10px 0; display: flex; }
+  .row.user { justify-content: flex-end; }
+  .bubble { max-width: 76%; padding: 10px 14px; border-radius: 12px; font-size: 14px;
+            line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+  .row.user .bubble { background: var(--user); color: #fff; border-bottom-right-radius: 4px; }
+  .row.bot .bubble { background: var(--panel); border: 1px solid var(--line);
+                     border-bottom-left-radius: 4px; }
+  .toolcard { max-width: 86%; background: var(--panel); border: 1px dashed var(--line);
+              border-radius: 8px; padding: 8px 12px; font-size: 12.5px; color: var(--tool);
+              font-family: Consolas, monospace; }
+  .toolcard .nm { color: var(--text); font-weight: 600; }
+  .toolcard details { margin-top: 6px; }
+  .toolcard summary { cursor: pointer; color: var(--muted); }
+  .toolcard pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word;
+                  font-size: 12px; max-height: 260px; overflow-y: auto; }
+  .reflect { max-width: 86%; border-left: 3px solid var(--warn); background: #fffbeb;
+             padding: 8px 12px; border-radius: 6px; font-size: 13px; white-space: pre-wrap; }
+  .notice { text-align: center; color: var(--muted); font-size: 12px; margin: 6px; }
+  /* 审批卡片 */
+  #approve { display: none; margin: 0 26px 8px; border: 1px solid #f59e0b;
+             background: #fffbeb; border-radius: 10px; padding: 12px; }
+  #approve .tt { font-weight: 600; color: var(--warn); font-size: 13px; margin-bottom: 6px; }
+  #approve pre { background: #fff; border: 1px solid var(--line); border-radius: 6px;
+                 padding: 8px; font-size: 12px; max-height: 220px; overflow: auto;
+                 white-space: pre-wrap; margin: 0 0 10px; }
+  #approve .btns { display: flex; gap: 8px; }
+  #approve button { padding: 6px 14px; border-radius: 8px; border: 1px solid var(--line);
+                    background: #fff; cursor: pointer; font-size: 13px; }
+  #approve button.ok { background: var(--ok); color: #fff; border-color: var(--ok); }
+  #approve button.always { background: #fff; color: var(--ok); border-color: var(--ok); }
+  #approve button.no { background: #fff; color: #b91c1c; border-color: #b91c1c; }
+  /* 输入区 */
+  #composer { display: flex; gap: 10px; padding: 14px 26px 18px; align-items: flex-end; }
+  #msg { flex: 1; resize: none; border: 1px solid var(--line); border-radius: 10px;
+         padding: 10px 12px; font-size: 14px; font-family: inherit; height: 46px;
+         outline: none; background: var(--panel); }
+  #msg:focus { border-color: var(--accent); }
+  #send { padding: 12px 22px; background: var(--accent); color: #fff; border: 0;
+          border-radius: 10px; cursor: pointer; font-size: 14px; }
+  #stopbtn { padding: 12px 14px; background: #fff; color: #b91c1c; border: 1px solid #b91c1c;
+             border-radius: 10px; cursor: pointer; font-size: 14px; }
+  #send:disabled, #msg:disabled { opacity: .5; cursor: not-allowed; }
+  #stopbtn:disabled { opacity: .35; cursor: not-allowed; }
+  #status { padding: 0 26px 10px; font-size: 11.5px; color: var(--muted);
+            display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+  <div id="side">
+    <h1>mini_agent</h1>
+    <div class="sub">通用工作区助手</div>
+    <button id="newbtn">＋ 新会话</button>
+    <div id="sessions"></div>
+    <label class="chk"><input type="checkbox" id="reflect"> 任务后自检反思</label>
+    <div id="meta"></div>
+  </div>
+  <div id="main">
+    <div id="chat"></div>
+    <div id="approve">
+      <div class="tt">⚠ 需要你审批的写操作</div>
+      <pre id="approve_pre"></pre>
+      <div class="btns">
+        <button class="ok" id="ap_ok">允许</button>
+        <button class="always" id="ap_always">本会话总允许</button>
+        <button class="no" id="ap_no">拒绝</button>
+      </div>
+    </div>
+    <div id="composer">
+      <textarea id="msg" placeholder="输入任务, Enter 发送 (Shift+Enter 换行)"></textarea>
+      <button id="stopbtn" disabled title="停止当前任务">停止</button>
+      <button id="send">发送</button>
+    </div>
+    <div id="status"><span id="st_left">就绪</span><span id="st_right"></span></div>
+  </div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let cur = null, es = null, running = false, pendingId = null;
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function node(html) {
+  const chat = $("chat");
+  const d = document.createElement("div");
+  d.innerHTML = html;
+  const el = d.firstChild;
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+function addBubble(kind, text) {
+  if (kind === "user") node('<div class="row user"><div class="bubble"></div></div>')
+    .querySelector(".bubble").textContent = text;
+  else node('<div class="row bot"><div class="bubble"></div></div>')
+    .querySelector(".bubble").textContent = text;
+}
+
+function addToolCard(name, args) {
+  return node(`<div class="row"><div class="toolcard"><span class="nm">→ ${esc(name)}</span>` +
+    `<span>(${esc(args)})</span><details><summary>结果</summary><pre></pre></details></div></div>`)
+    .querySelector("pre");
+}
+
+function addReflect(critique) {
+  node('<div class="row"><div class="reflect"></div></div>')
+    .querySelector(".reflect").textContent = "🔍 反思: " + critique;
+}
+
+function notice(text) { node(`<div class="notice">${esc(text)}</div>`); }
+
+function setRunning(v, usage) {
+  running = v;
+  $("send").disabled = v; $("msg").disabled = v;
+  $("stopbtn").disabled = !v;
+  $("st_left").textContent = v ? "⏳ 任务执行中… (可点停止转向)" : "就绪";
+  if (usage) showUsage(usage);
+}
+
+function showUsage(u) {
+  $("st_right").textContent =
+    `模型 ${es && es._model || ""} · 调用${u.calls}次 · ${u.total_tokens.toLocaleString()} tokens`;
+}
+
+/* ---------- 审批 ---------- */
+function showApprove(ev) {
+  pendingId = ev.id;
+  $("approve_pre").textContent = ev.preview;
+  $("approve").style.display = "block";
+  $("st_left").textContent = `⚠ 等待审批: ${ev.tool}`;
+}
+function hideApprove() { $("approve").style.display = "none"; pendingId = null; }
+async function approve(decision, always) {
+  if (!pendingId) return;
+  const id = pendingId; hideApprove();
+  await fetch("/api/approve", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session: cur, id, approve: decision, always})});
+}
+
+/* ---------- 事件路由 ---------- */
+function handle(ev) {
+  switch (ev.kind) {
+    case "hello":
+      es._model = ev.model;
+      $("meta").innerHTML = `模型: ${esc(ev.model)}<br>沙箱: ${esc(ev.root)}<br>工具: ${ev.tools.length} 个`;
+      break;
+    case "task_start":
+      hideApprove();
+      addBubble("user", ev.task);
+      setRunning(true);
+      break;
+    case "assistant": addBubble("bot", ev.text); break;
+    case "tool_call": addToolCard(ev.name, ev.args)._pending = true; break;
+    case "tool_result": {
+      const pres = document.querySelectorAll("#chat .toolcard pre");
+      const pre = pres[pres.length - 1];
+      if (pre) pre.textContent = ev.result;
+      const chat = $("chat"); chat.scrollTop = chat.scrollHeight;
+      break;
+    }
+    case "permission_request": showApprove(ev); break;
+    case "permission_resolved": hideApprove(); break;
+    case "permission_denied": notice(`已拒绝: ${ev.name}`); break;
+    case "cancelled": notice("⛔ 已按用户要求中断, 可输入新指令转向"); hideApprove(); break;
+    case "reflect": addReflect(ev.critique); break;
+    case "fix_round": notice("🔁 反思发现问题, 自动修正一轮"); break;
+    case "compact": notice(`上下文压缩: 约${ev.tokens} tokens`); break;
+    case "fatal": notice(`错误: ${ev.message}`); break;
+    case "max_turns": notice("达到最大轮数上限"); break;
+    case "running": setRunning(ev.value, ev.usage); break;
+    case "task_end":
+      setRunning(false, ev.usage);
+      loadSessions();
+      break;
+  }
+}
+
+/* ---------- 会话 ---------- */
+function connect() {
+  if (es) es.close();
+  es = new EventSource(`/api/events?session=${encodeURIComponent(cur)}`);
+  es.onmessage = (e) => handle(JSON.parse(e.data));
+}
+async function loadSessions() {
+  const list = await (await fetch("/api/sessions")).json();
+  $("sessions").innerHTML = list.slice(0, 30).map((s) =>
+    `<div class="sess${s.name === cur ? " on" : ""}" data-n="${esc(s.name)}">` +
+    `<span>${esc(s.name)}</span><span class="t">${esc(s.mtime)}</span></div>`).join("");
+  $("sessions").querySelectorAll(".sess").forEach((el) =>
+    el.onclick = () => openSession(el.dataset.n));
+}
+async function openSession(name) {
+  cur = name;
+  $("chat").innerHTML = "";
+  hideApprove();
+  const r = await (await fetch(`/api/sessions/${encodeURIComponent(name)}/history`)).json();
+  r.items.forEach(handle);
+  setRunning(r.running, r.usage);
+  connect();
+  loadSessions();
+}
+function newSession() {
+  const n = "web_" + new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 14);
+  openSession(n);
+}
+
+/* ---------- 发送 ---------- */
+async function send() {
+  const text = $("msg").value.trim();
+  if (!text || running || !cur) return;
+  $("msg").value = "";
+  const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session: cur, message: text, reflect: $("reflect").checked})});
+  if (!r.ok) { const e = await r.json().catch(() => ({})); notice(e.error || "发送失败"); }
+}
+$("send").onclick = send;
+$("stopbtn").onclick = async () => {
+  if (!cur || !running) return;
+  $("stopbtn").disabled = true;
+  $("st_left").textContent = "⏳ 正在停止…";
+  await fetch("/api/stop", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session: cur})});
+};
+$("msg").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("ap_ok").onclick = () => approve(true, false);
+$("ap_always").onclick = () => approve(true, true);
+$("ap_no").onclick = () => approve(false, false);
+$("newbtn").onclick = newSession;
+
+newSession();
+</script>
+</body>
+</html>

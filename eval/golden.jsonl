@@ -1,0 +1,12 @@
+{"id": "count_py", "suite": "core", "cwd": "here", "task": "当前目录下(含子目录)一共有多少个 .py 文件? 简要说明", "checks": {"tools_used_any": ["list_dir", "grep", "run_python"], "answer_contains_any": ["个", "文件"], "max_llm_calls": 6}}
+{"id": "grep_def_main", "suite": "core", "cwd": "here", "task": "用 grep 搜索 'def main' 出现在哪些文件里", "checks": {"tools_used": ["grep"], "answer_contains_any": ["mini_agent", "server"], "max_llm_calls": 5}}
+{"id": "read_head", "suite": "core", "cwd": "fixtures", "task": "读取 sample.py 的前 20 行, 概括它做了什么", "checks": {"tools_used": ["read_file"], "answer_contains_any": ["main", "42", "函数", "求和"], "max_llm_calls": 5}}
+{"id": "arith_tool", "suite": "core", "cwd": "fixtures", "task": "计算 2 的 20 次方等于多少? 必须用工具算", "checks": {"tools_used": ["run_python"], "answer_contains_any": ["1048576", "1,048,576"], "max_llm_calls": 5}}
+{"id": "missing_file", "suite": "core", "cwd": "fixtures", "task": "读取 not_exist_file.txt 的内容并告诉我", "checks": {"tools_used": ["read_file"], "answer_contains_any": ["不存在", "无法", "没有", "未找到"], "max_llm_calls": 6}}
+{"id": "biggest_file", "suite": "core", "cwd": "here", "task": "fixtures 目录里哪个文件最大? 给出文件名", "checks": {"tools_used_any": ["list_dir", "run_python"], "answer_contains": ["notes.txt"], "max_llm_calls": 6}}
+{"id": "memory_save", "suite": "core", "cwd": "fixtures", "task": "用 save_memory 记住这句话: 评测专用记忆条目 EVAL-MEM-TEST, 然后回复已记住", "checks": {"tools_used": ["save_memory"], "answer_contains_any": ["已", "记住"], "max_llm_calls": 5}}
+{"id": "no_data_dir", "suite": "core", "cwd": "fixtures", "task": "沙箱里的 data 目录下有什么? 如果不存在就直接说不存在", "checks": {"tools_used_any": ["list_dir", "grep"], "answer_contains_any": ["不存在", "没有"], "max_llm_calls": 5}}
+{"id": "wm_route_g531", "suite": "workmain", "cwd": "fixtures", "task": "查一下 G531 的路线复盘现状(动作口径)", "checks": {"tools_used": ["query_sku_route"], "answer_contains_any": ["Part8", "71", "停滞"], "max_llm_calls": 5}}
+{"id": "wm_product_g570", "suite": "workmain", "cwd": "fixtures", "task": "G570 的 ASIN 是什么?", "checks": {"tools_used": ["get_product_info"], "answer_contains": ["B0H8Q8719H"], "max_llm_calls": 5}}
+{"id": "wm_kb_60d", "suite": "workmain", "cwd": "fixtures", "task": "从知识库里查: 新品售前全流程的红线是多少天?", "checks": {"tools_used": ["search_kb"], "answer_contains": ["60"], "max_llm_calls": 5}}
+{"id": "wm_alerts", "suite": "workmain", "cwd": "fixtures", "task": "本周有哪些新增SKU? 有哪些临期和已超期的提醒?", "checks": {"tools_used": ["pipeline_alerts"], "answer_contains_any": ["G5", "个"], "max_llm_calls": 5}}

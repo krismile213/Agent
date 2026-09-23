@@ -1,0 +1,11 @@
+requests>=2.28
+# --- Web 前端(server.py)需要; 只用CLI可不装 ---
+fastapi>=0.110
+uvicorn>=0.27
+# --- MCP 双向接入需要; 不用 mcp_server.py/mcp_bridge.py 可不装 ---
+mcp>=1.2
+# --- 以下仅 plugins/workmain.py 需要, 不用该插件可不装 ---
+pandas>=2.0
+openpyxl>=3.1
+rank_bm25>=0.2.2   # search_kb 用; 还需在 work-main 下执行 python agent/kb/build_kb.py 建索引
+jieba>=0.42        # 同上(分词)

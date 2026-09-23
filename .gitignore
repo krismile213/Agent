@@ -1,0 +1,10 @@
+config.json
+sessions/
+__pycache__/
+*.pyc
+.selftest_demo/
+report.md
+eval/sessions/
+eval/reports/
+briefs/
+.idea/
