@@ -50,8 +50,9 @@ def server_direction():
                 r = await session.call_tool("query_sku_route",
                                             {"sku": "G531", "caliber": "action"})
                 txt = "\n".join(getattr(c, "text", "") for c in r.content)
+                # 只锚定稳定字段, 不锚定会随复盘重跑漂移的业务数值(如停滞天数)
                 check("tools/call query_sku_route(插件工具经MCP可用)",
-                      "Part8" in txt and "71" in txt)
+                      "G531" in txt and "卡点Part" in txt and "停滞" in txt)
     asyncio.run(run())
 
 

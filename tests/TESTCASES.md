@@ -135,3 +135,7 @@
 | TC-F05 | config.json 拒绝下载(403) | auto | 同上 | 敏感文件保护 |
 | TC-F06 | 下载/上传路径穿越拦截(400) | auto | 同上 | ../ 与文件名路径成分均被防 |
 | TC-F07 | UI 导入→引用→生成→下载 全链路 | manual | Web 导入一个 xlsx，消息"用 run_python 读 uploads/xx.xlsx 前几行"，让它生成报告 md，文件面板点击下载 | 全链路闭环 |
+
+```
+https://open.bigmodel.cn
+```
