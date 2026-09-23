@@ -94,15 +94,15 @@ def register(registry, cfg):
 
 路径锁在 `--cwd` 沙箱（越界拦截有自检）；只读放行/写确认/`--yolo` 三档；工具输出 8000 字符截断；`max_turns` 防失控；工具异常转文本回灌由模型自愈。
 
-## 评测（金标准回归）
+## 测试体系
 
 ```powershell
-python eval/run_eval.py                  # 全部11用例(core+workmain), 报告落 eval/reports/
-python eval/run_eval.py --suite core     # 不依赖workmain插件的8用例
-python eval/run_eval.py --case arith_tool --model glm-5.3   # 单用例/换模型对比
+python scripts/run_all.py                    # 快速层(秒级, 不耗token): selftest+全部单测
+python scripts/run_all.py --tier full        # 全量: +MCP双向+Web冒烟+各E2E+金标准评测(~15分钟)
+python scripts/run_all.py --tier full --skip mcp,eval   # 按需跳过
 ```
 
-11 个金标准用例覆盖：工具选择（该用哪个工具）、自愈（文件不存在后的诚实回答）、工具强制（数字必须来自 run_python）、记忆写入、workmain 域工具（G531 卡点/G570 ASIN/知识库红线）。断言式判定（工具使用/回答包含/自然完成/调用上限），不用 judge 模型，跑一遍约 5 万 token、3 分钟。**约定：换模型、改 prompt、改工具描述、改引擎逻辑后必须先跑评测再合入**——报告和失败用例的完整事件流（`eval/sessions/`）是排查回归的第一现场。
+三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，14 用例，含 research 扇出与 plan 模式，断言式判定 + events_contains 事件断言，网络异常单用例重试，报告落 eval/reports/）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，11 个模块约 60 条，每条标注 auto/manual、命令与预期）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
 
 ## MCP 双向接入（工具生态）
 

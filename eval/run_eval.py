@@ -59,8 +59,18 @@ def run_case(case: dict, cfg: dict, registry, policy) -> dict:
         events.append({"kind": kind, **data})
 
     t0 = time.time()
-    answer = core.run_task(client, registry, policy, tr, history,
-                           case["task"], cfg, emit=emit)
+    mode = case.get("mode", "chat")
+    if mode in ("plan", "plan_stepwise"):
+        # 评测口径: 计划自动批准; 分步模式步间自动继续(只测机制不测交互)
+        answer = core.plan_and_run(
+            client, registry, policy, lambda p: True, tr, history,
+            case["task"], cfg, emit=emit,
+            stepwise=(mode == "plan_stepwise"),
+            step_confirm=(lambda i, n, st, a: ("continue", ""))
+            if mode == "plan_stepwise" else None)
+    else:
+        answer = core.run_task(client, registry, policy, tr, history,
+                               case["task"], cfg, emit=emit)
     tr.close()
     return {"answer": answer or "", "events": events,
             "usage": dict(client.usage), "dur": round(time.time() - t0, 1)}
@@ -91,6 +101,9 @@ def evaluate(case: dict, res: dict) -> list:
                 and not ans.startswith(("[", "(")))
     if ch.get("must_finish", True) and not finished:
         fails.append(f"任务未自然完成(answer={ans[:60]!r})")
+    for k in ch.get("events_contains", []):
+        if not any(e.get("kind") == k for e in evs):
+            fails.append(f"缺少事件 {k}")
     m = ch.get("max_llm_calls")
     if m and res["usage"]["calls"] > m:
         fails.append(f"LLM调用{res['usage']['calls']}次超上限{m}")
