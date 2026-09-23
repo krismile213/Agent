@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -366,8 +367,13 @@ def _preview_write(kwargs: dict) -> str:
     return f"[写操作] write_file({path}) 新建 {len(new)} 行, 预览:\n{shown}"
 
 
+_REG_REF: Registry | None = None  # research 工具运行时引用当前注册表(含插件)
+
+
 def build_registry() -> Registry:
+    global _REG_REF
     r = Registry()
+    _REG_REF = r
     r.register(Tool(
         "read_file", "读取沙箱内文本文件(按行, 支持分段). 二进制/xlsx不可读.",
         {"type": "object", "properties": {
@@ -407,6 +413,17 @@ def build_registry() -> Registry:
         {"type": "object", "properties": {
             "content": {"type": "string", "description": "要记住的要点, 一句话"}},
          "required": ["content"]}, "write", t_save_memory))
+    r.register(Tool(
+        "research",
+        "并行派出最多4个只读子agent分头调查(每个独立上下文互不污染), 返回各自结论. "
+        "适合: 多文件/多方向的探索、互不依赖的并行查证. tasks为任务数组. "
+        "子agent只有只读工具, 需要写操作的任务留给你自己执行.",
+        {"type": "object", "properties": {
+            "tasks": {"type": "array", "items": {"type": "string"},
+                      "description": "子任务列表, 最多4个"},
+            "max_turns": {"type": "integer", "minimum": 1,
+                          "description": "每个子agent最大轮数, 默认10"}},
+         "required": ["tasks"]}, "read", t_research))
     return r
 
 
@@ -454,15 +471,95 @@ SYSTEM_TEMPLATE = """你是 mini_agent, 一个运行在本地目录上的通用�
 
 def build_system_prompt() -> str:
     sp = SYSTEM_TEMPLATE.format(root=ROOT, today=datetime.now().strftime("%Y-%m-%d"))
+    sp += _memory_block()
+    return sp
+
+
+def _memory_block() -> str:
+    """跨会话记忆 + 项目记忆的注入块(主agent与子agent共用)."""
+    block = ""
     mem = HERE / "MEMORY.md"
     if mem.exists():
-        sp += ("\n# 跨会话记忆(MEMORY.md, 历次会话沉淀的要点, 优先级高于一般常识)\n"
-               + clip(mem.read_text("utf-8", errors="replace"), 4_000))
+        block += ("\n# 跨会话记忆(MEMORY.md, 历次会话沉淀的要点, 优先级高于一般常识)\n"
+                  + clip(mem.read_text("utf-8", errors="replace"), 4_000))
     am = ROOT / "AGENT.md"
     if am.exists():
-        sp += ("\n# 项目记忆(AGENT.md, 用户维护的业务口径, 优先级高于一般常识)\n"
-               + clip(am.read_text("utf-8", errors="replace"), 6_000))
-    return sp
+        block += ("\n# 项目记忆(AGENT.md, 用户维护的业务口径, 优先级高于一般常识)\n"
+                  + clip(am.read_text("utf-8", errors="replace"), 6_000))
+    return block
+
+
+# ============================================================
+# 子agent (独立上下文的只读调查员, 对应 Claude Code 的 Explore)
+# ============================================================
+
+SUBAGENT_SYS = """你是子agent, 由主agent派出独立完成一项调查子任务.
+
+规则:
+1. 你只有只读工具, 只调查不修改; 需要写操作的任务留给主agent.
+2. 主agent只能看到你的最终结论(看不到你的过程), 结论必须自包含.
+3. 按结构输出: 结论(1~2句) / 关键事实(带工具或文件来源) / 如有: 建议.
+中文, 500字以内.
+
+工作沙箱: {root}
+当前日期: {today}
+"""
+
+
+def run_subagent(client: LLMClient, registry: Registry, task: str, cfg: dict,
+                 name: str = "sub") -> str:
+    """独立上下文的只读子agent: 自己的会话/系统提示/注册表副本, 结论返回主agent.
+    上下文隔离 —— 子agent的中间过程不占用主agent的上下文窗口."""
+    ro = Registry()
+    for t in registry._tools.values():
+        if t.level == "read":
+            ro.register(t)
+    sp = (SUBAGENT_SYS.format(root=ROOT, today=datetime.now().strftime("%Y-%m-%d"))
+          + _memory_block())
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tr = Transcript(HERE / "sessions" / f"sub_{ts}_{name}.jsonl")
+    history = [{"role": "system", "content": sp}]
+    answer = run_task(client, ro, YoloPolicy(), tr, history, task, cfg, emit=None)
+    tr.log("end", {"reason": "subagent", **client.usage})
+    tr.close()
+    return answer
+
+
+def t_research(tasks, max_turns: int = 10) -> str:
+    """并行扇出: 每个任务一个独立只读子agent(线程), 汇总各自结论.
+    硬上限4个任务/每个15轮, 防失控烧token."""
+    if isinstance(tasks, str):
+        tasks = [tasks]
+    if not isinstance(tasks, list) or not tasks:
+        return "[参数错误] tasks 需为任务字符串数组"
+    tasks = [str(t) for t in tasks[:4]]
+    cfg = load_config()
+    if not cfg.get("api_key"):
+        return "[工具错误] 未配置 API Key"
+    sub_cfg = dict(cfg, max_turns=max(1, min(int(max_turns), 15)))
+    reg = _REG_REF if _REG_REF is not None else build_registry()
+    results, errs = [""] * len(tasks), [""] * len(tasks)
+
+    def _work(i: int, t: str):
+        try:
+            client = LLMClient(sub_cfg)  # 每个子agent独立client: 线程安全+用量隔离
+            results[i] = run_subagent(client, reg, t, sub_cfg, name=f"t{i + 1}")
+        except Exception as e:
+            errs[i] = f"{type(e).__name__}: {e}"
+
+    threads = [threading.Thread(target=_work, args=(i, t), daemon=True,
+                                name=f"subagent-{i + 1}")
+               for i, t in enumerate(tasks)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    parts = []
+    for i, t in enumerate(tasks):
+        body = results[i] if results[i] else f"(失败: {errs[i] or '未知错误'})"
+        log(f"[research] 子任务{i + 1} 完成: {t[:50]}")
+        parts.append(f"[子任务{i + 1}] {t}\n{clip(body, 2200)}")
+    return clip("\n\n".join(parts), 9_000)
 
 
 # ============================================================
@@ -734,6 +831,57 @@ def reflect_and_fix(client: LLMClient, registry: Registry, policy,
         if not answer or answer.startswith(("[", "(")):
             break
     return answer
+
+
+# ============================================================
+# 计划模式 (plan-then-execute, 对应 Claude Code 的 plan mode)
+# ============================================================
+
+PLAN_SYS = """你是任务规划器. 针对用户的任务, 结合可用工具制定一个简洁的执行计划.
+
+要求:
+- 3~6步, 每步一行: 序号. 动作(用什么工具/看什么文件) → 该步产出
+- 涉及写文件/执行命令的步骤, 行首标注[写]
+- 最后一行输出"预计轮次: N"
+- 不执行任何工具, 只输出计划本体."""
+
+
+def propose_plan(client: LLMClient, registry: Registry, task: str,
+                 cfg: dict) -> str:
+    tools_desc = "\n".join(f"- {t.name}({'写' if t.level == 'write' else '读'}): "
+                           f"{t.description}" for t in registry._tools.values())
+    msg = client.chat([
+        {"role": "system", "content": PLAN_SYS + "\n可用工具:\n" + tools_desc},
+        {"role": "user", "content": task}])
+    return (msg.get("content") or "").strip()
+
+
+def plan_and_run(client: LLMClient, registry: Registry, policy,
+                 confirm, transcript: Transcript, history: list, task: str,
+                 cfg: dict, emit=None, cancel=None) -> str:
+    """计划模式: 生成计划 → confirm(plan)人工批准 → 按计划执行.
+    confirm(plan_text)->bool 由适配器提供(CLI=input确认, Web=审批收件箱)."""
+    emit = emit or (lambda kind, data: None)
+    if cancel is not None and cancel.is_set():
+        return run_task(client, registry, policy, transcript, history,
+                        task, cfg, emit=emit, cancel=cancel)
+    plan = propose_plan(client, registry, task, cfg)
+    if not plan:
+        emit("plan_rejected", {"plan": "(计划生成失败, 直接执行)"})
+        return run_task(client, registry, policy, transcript, history,
+                        task, cfg, emit=emit, cancel=cancel)
+    emit("plan", {"plan": plan})
+    if not confirm(plan):
+        emit("plan_rejected", {"plan": plan})
+        history.append({"role": "user",
+                        "content": "[计划已否决]用户否决了该计划, 任务未执行, "
+                                   "等待用户进一步指示:\n" + plan})
+        transcript.log("message", {"msg": history[-1]})
+        return "[计划被用户否决] 任务未执行。"
+    emit("plan_approved", {})
+    task2 = task + "\n\n[已批准的执行计划, 请严格按计划执行]\n" + plan
+    return run_task(client, registry, policy, transcript, history,
+                    task2, cfg, emit=emit, cancel=cancel)
 
 
 # ============================================================

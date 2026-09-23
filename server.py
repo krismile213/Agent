@@ -41,12 +41,12 @@ EVLOG_MAX = 500  # 每会话保留的最近事件数(SSE断线重放窗口)
 
 
 class PendingReq:
-    """一次待审批的写操作: 引擎线程 wait(), 审批端点 set()."""
+    """一次待审批的操作(写工具或执行计划): 引擎线程 wait(), 审批端点 set()."""
 
-    def __init__(self, tool, kwargs: dict):
+    def __init__(self, name: str, preview: str):
         self.id = uuid.uuid4().hex[:12]
-        self.tool_name = tool.name
-        self.preview = tool.preview(kwargs)
+        self.tool_name = name
+        self.preview = preview
         self.session = ""
         self.ev = threading.Event()
         self.approved = False
@@ -62,7 +62,7 @@ class WebPolicy:
     def allow(self, tool, kwargs: dict) -> bool:
         if tool.level == "read" or tool.name in self.sess.always:
             return True
-        req = PendingReq(tool, kwargs)
+        req = PendingReq(tool.name, tool.preview(kwargs))
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("permission_request",
@@ -71,6 +71,22 @@ class WebPolicy:
         req.ev.wait()  # 阻塞引擎线程直到浏览器审批(本地单用户, 不设超时)
         if req.always:
             self.sess.always.add(tool.name)
+        return req.approved
+
+
+class WebPlanConfirmer:
+    """计划模式的网页审批: 复用审批收件箱机制, 引擎线程等待浏览器批准计划."""
+
+    def __init__(self, sess: "SessionState"):
+        self.sess = sess
+
+    def __call__(self, plan: str) -> bool:
+        req = PendingReq("执行计划", plan[:4000])
+        req.session = self.sess.name
+        PENDING[req.id] = req
+        self.sess.emit_threadsafe("plan_request",
+                                  {"id": req.id, "plan": plan[:4000]})
+        req.ev.wait()
         return req.approved
 
 
@@ -121,6 +137,7 @@ class ChatBody(BaseModel):
     session: str
     message: str
     reflect: bool = False
+    plan: bool = False
 
 
 class ApproveBody(BaseModel):
@@ -202,9 +219,15 @@ async def chat(body: ChatBody):
     def work():
         try:
             start = len(s.history)
-            answer = core.run_task(s.client, REG, WebPolicy(s), s.transcript,
-                                   s.history, body.message, CFG,
-                                   emit=s.emit_threadsafe, cancel=s.cancel)
+            if body.plan:
+                answer = core.plan_and_run(s.client, REG, WebPolicy(s),
+                                           WebPlanConfirmer(s), s.transcript,
+                                           s.history, body.message, CFG,
+                                           emit=s.emit_threadsafe, cancel=s.cancel)
+            else:
+                answer = core.run_task(s.client, REG, WebPolicy(s), s.transcript,
+                                       s.history, body.message, CFG,
+                                       emit=s.emit_threadsafe, cancel=s.cancel)
             if body.reflect and answer and not answer.startswith(("[", "(")):
                 core.reflect_and_fix(s.client, REG, WebPolicy(s), s.transcript,
                                      s.history, start, answer, CFG,

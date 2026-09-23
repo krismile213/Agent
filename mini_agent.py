@@ -71,6 +71,12 @@ def cli_emit(kind: str, data: dict):
         print(f"  [拒绝] {data['name']}")
     elif kind == "compact":
         print(f"[压缩] 约{data['tokens']}tokens, 已压缩{data['dropped']}条早期消息")
+    elif kind == "plan":
+        print(f"[计划]\n{clip(data['plan'], 1500)}")
+    elif kind == "plan_approved":
+        print("[计划] 已批准, 开始执行")
+    elif kind == "plan_rejected":
+        print(f"[计划] 未执行: {clip(str(data.get('plan', '')), 200)}")
     elif kind == "reflect":
         print(f"[反思] {clip(data['critique'], 800)}")
     elif kind == "fix_round":
@@ -99,6 +105,8 @@ def main():
     ap.add_argument("--resume", action="store_true", help="恢复指定会话的历史上下文")
     ap.add_argument("--yolo", action="store_true", help="跳过所有权限确认(风险自负)")
     ap.add_argument("--reflect", action="store_true", help="每个任务完成后做一次自检反思")
+    ap.add_argument("--plan", action="store_true",
+                    help="计划模式: 先生成执行计划, 人工批准后再执行")
     ap.add_argument("--no-plugins", action="store_true", help="禁用全部插件(纯通用模式)")
     ap.add_argument("--selftest", action="store_true", help="离线自检(不需要API Key)")
     args = ap.parse_args()
@@ -133,10 +141,21 @@ def main():
     print(f"[启动] model={cfg['model']} 沙箱={core.ROOT} 会话={transcript.path.name}")
     print(f"[工具] {'/'.join(registry.names())}")
 
+    def confirm_plan(plan: str) -> bool:
+        if args.yolo:
+            print("[计划] (--yolo 自动批准)")
+            return True
+        return input("  批准执行该计划? [y/n]: ").strip().lower() in ("y", "yes", "")
+
     def run_with_reflect(task_text: str) -> str:
         start = len(history)
-        answer = core.run_task(client, registry, policy, transcript, history,
-                               task_text, cfg, emit=cli_emit)
+        if args.plan:
+            answer = core.plan_and_run(client, registry, policy, confirm_plan,
+                                       transcript, history, task_text, cfg,
+                                       emit=cli_emit)
+        else:
+            answer = core.run_task(client, registry, policy, transcript, history,
+                                   task_text, cfg, emit=cli_emit)
         if args.reflect and answer and not answer.startswith(("[", "(")):
             answer = core.reflect_and_fix(client, registry, policy, transcript,
                                           history, start, answer, cfg,
