@@ -65,10 +65,15 @@ def main():
     core.set_root(workmain)  # 沙箱指向 work-main, 才能读预警文件
 
     registry = build_readonly_registry(cfg)
-    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    pm = now.hour >= 12          # 午后运行: 午后简报(独立文件/会话, 不覆盖晨检)
+    tag = "午后简报" if pm else "晨检简报"
+    suffix = "_pm" if pm else ""
     task = TASK_TEMPLATE.format(date=today)
 
-    transcript = core.Transcript(f"brief_{datetime.now().strftime('%Y%m%d')}")
+    transcript = core.Transcript(
+        f"brief_{now.strftime('%Y%m%d')}{suffix}")
     history = [{"role": "system", "content": core.build_system_prompt()}]
     client = core.LLMClient(cfg)
     answer = core.run_task(
@@ -80,20 +85,20 @@ def main():
 
     brief_dir = HERE / "briefs"
     brief_dir.mkdir(exist_ok=True)
-    out = brief_dir / f"{today}.md"
-    body = f"# 晨检简报 {today}\n\n{answer}\n\n> 用量: {client.usage_summary()}\n"
+    out = brief_dir / f"{today}{suffix}.md"
+    body = f"# {tag} {today}\n\n{answer}\n\n> 用量: {client.usage_summary()}\n"
     out.write_text(body, encoding="utf-8")
-    print(f"[晨检] 简报已写入 {out}")
-    print(f"[晨检] {client.usage_summary()}")
+    print(f"[{tag}] 简报已写入 {out}")
+    print(f"[{tag}] {client.usage_summary()}")
 
     if args.push:
         try:
             import dingtalk_push
-            ok, msg = dingtalk_push.send(f"晨检简报 {today}",
+            ok, msg = dingtalk_push.send(f"{tag} {today}",
                                          answer[:1800] or "(空)")
-            print(f"[晨检] 推送{'成功' if ok else '失败'}: {msg}")
+            print(f"[{tag}] 推送{'成功' if ok else '失败'}: {msg}")
         except Exception as e:
-            print(f"[晨检] 推送异常(不影响落盘): {e}")
+            print(f"[{tag}] 推送异常(不影响落盘): {e}")
     return 0
 
 
