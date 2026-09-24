@@ -47,10 +47,8 @@ def load_cases() -> list:
 def run_case(case: dict, cfg: dict, registry, policy) -> dict:
     root = HERE if case.get("cwd", "here") == "here" else FIXTURES
     core.set_root(root)
-    tpath = EVAL_DIR / "sessions" / f"eval_{case['id']}.jsonl"
-    tpath.parent.mkdir(parents=True, exist_ok=True)
-    tpath.unlink(missing_ok=True)  # 每次干净重跑
-    tr = core.Transcript(tpath)
+    tr = core.Transcript(f"eval_{case['id']}")
+    tr.clear()  # 每次干净重跑
     history = [{"role": "system", "content": core.build_system_prompt()}]
     client = core.LLMClient(cfg)
     events = []

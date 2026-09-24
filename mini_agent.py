@@ -155,15 +155,15 @@ def main():
                  "或设置环境变量 AGENT_API_KEY")
 
     name = args.session or datetime.now().strftime("%Y%m%d_%H%M%S")
-    transcript = core.Transcript(core.HERE / "sessions" / f"{name}.jsonl")
-    history = core.Transcript.load_messages(transcript.path) if args.resume else []
+    transcript = core.Transcript(name)
+    history = core.Transcript.load_messages(name) if args.resume else []
     if args.resume:
         print(f"[会话] 已恢复 {len(history)} 条历史消息")
     history.insert(0, {"role": "system", "content": core.build_system_prompt()})
 
     client = core.LLMClient(cfg)
     policy = InteractivePolicy(yolo=args.yolo)
-    print(f"[启动] model={cfg['model']} 沙箱={core.ROOT} 会话={transcript.path.name}")
+    print(f"[启动] model={cfg['model']} 沙箱={core.ROOT} 会话={name}")
     print(f"[工具] {'/'.join(registry.names())}")
 
     def confirm_plan(plan: str) -> bool:

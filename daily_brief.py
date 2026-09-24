@@ -68,8 +68,7 @@ def main():
     today = datetime.now().strftime("%Y-%m-%d")
     task = TASK_TEMPLATE.format(date=today)
 
-    transcript = core.Transcript(
-        HERE / "sessions" / f"brief_{datetime.now().strftime('%Y%m%d')}.jsonl")
+    transcript = core.Transcript(f"brief_{datetime.now().strftime('%Y%m%d')}")
     history = [{"role": "system", "content": core.build_system_prompt()}]
     client = core.LLMClient(cfg)
     answer = core.run_task(

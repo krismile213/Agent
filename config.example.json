@@ -10,12 +10,32 @@
   "workmain_root": "C:\\Users\\dell\\Desktop\\work-main",
   "_mcp_servers_说明": "外部MCP server接入(mcp_bridge.py): name为工具前缀, level默认write(需确认), 只读server可设read",
   "mcp_servers": [
-    {"name": "demo", "command": "python", "args": ["mcp_server.py"], "level": "read", "_注释": "示例: agent消费自己的MCP server, 实际按需增删"}
+    {
+      "name": "demo",
+      "command": "python",
+      "args": [
+        "mcp_server.py"
+      ],
+      "level": "read",
+      "_注释": "示例: agent消费自己的MCP server, 实际按需增删"
+    }
   ],
   "_常用对照": {
     "z.ai coding plan(默认, 与ZCode同源)": "base_url=https://api.z.ai/api/coding/paas/v4  model=glm-5.3 或 glm-5.3-flash(更快更省); Key在 z.ai 控制台创建, 就是ZCode/Claude Code订阅用的那把",
     "智谱GLM(国内直连)": "base_url=https://open.bigmodel.cn/api/paas/v4  model=glm-4.7 或 glm-4.7-flash(免费)",
     "DeepSeek": "base_url=https://api.deepseek.com/v1  model=deepseek-chat",
     "其它OpenAI兼容": "base_url=厂商给的地址(一般以 /v1 结尾)  model=厂商模型名"
+  },
+  "storage": {
+    "backend": "sqlite",
+    "path": "agent.db",
+    "_说明": "会话/遥测/审计SQLite存储"
+  },
+  "limits": {
+    "max_concurrent_tasks": 3,
+    "llm_rpm": 60,
+    "breaker_fails": 5,
+    "breaker_cooldown_s": 120,
+    "_说明": "可用性: 并发闸门/LLM限流/熔断器"
   }
 }

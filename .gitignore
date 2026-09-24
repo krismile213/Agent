@@ -12,3 +12,4 @@ uploads/
 
 .trash/
 kb_cache/
+agent.db*

@@ -84,12 +84,16 @@ class WebPlanConfirmer:
         self.sess = sess
 
     def __call__(self, plan: str):
+        import storage
         req = PendingReq("执行计划", plan[:4000])
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("plan_request",
                                   {"id": req.id, "plan": plan[:4000]})
         req.ev.wait()
+        storage.approval(self.sess.name, "plan", "执行计划",
+                         "allowed" if req.approved else "denied",
+                         req.steer_text if req.approved else "")
         if req.approved and req.steer_text:
             return True, req.steer_text  # 批准+附加要求(引擎注入历史)
         return req.approved
@@ -111,6 +115,9 @@ class WebStepConfirmer:
                                   {"id": req.id, "step": i, "total": n,
                                    "text": step_text[:500]})
         req.ev.wait()
+        import storage
+        storage.approval(self.sess.name, "step", f"步骤{i}/{n}",
+                         "continue" if req.approved else "stop", req.steer_text)
         if req.approved:
             return "continue", req.steer_text  # 批准+可选修改指令(注入后续步骤)
         return "stop", ""
@@ -119,8 +126,8 @@ class WebStepConfirmer:
 class SessionState:
     def __init__(self, name: str):
         self.name = name
-        self.transcript = core.Transcript(core.HERE / "sessions" / f"{name}.jsonl")
-        self.history = core.Transcript.load_messages(self.transcript.path)
+        self.transcript = core.Transcript(name)
+        self.history = core.Transcript.load_messages(name)
         self.history.insert(0, {"role": "system",
                                 "content": core.build_system_prompt()})
         self.client = core.LLMClient(CFG)
@@ -245,6 +252,8 @@ async def chat(body: ChatBody):
         return JSONResponse({"error": "该会话有任务正在运行, 请等待完成或点停止"}, 409)
     if not body.message.strip():
         return JSONResponse({"error": "消息为空"}, 400)
+    if TASK_SEM is not None and not TASK_SEM.acquire(blocking=False):
+        return JSONResponse({"error": "服务并发已满(任务排队中), 请稍后再试"}, 503)
     s.cancel.clear()
     s.running = True
     s.send("running", {"value": True})
@@ -276,6 +285,8 @@ async def chat(body: ChatBody):
             s.running = False
             s.emit_threadsafe("running", {"value": False,
                                           "usage": dict(s.client.usage)})
+            if TASK_SEM is not None:
+                TASK_SEM.release()
 
     threading.Thread(target=work, daemon=True, name=f"agent-{body.session}").start()
     return {"ok": True}
@@ -386,6 +397,44 @@ async def download_file(path: str):
     return FileResponse(p, filename=p.name)
 
 
+@app.get("/api/health")
+async def health():
+    """健康检查(容器/负载均衡探针)."""
+    return {"status": "ok", "model": CFG.get("model"),
+            "sessions": len(SESS),
+            "running": sum(1 for s in SESS.values() if s.running)}
+
+
+@app.get("/api/metrics")
+async def metrics():
+    """Prometheus 文本格式指标(可直接被 scrape; 数值源=SQLite遥测)."""
+    import storage
+    m = storage.q_metrics()
+    lines = ["# HELP agent_tasks_total 任务总数(按状态)",
+             "# TYPE agent_tasks_total counter"]
+    for st, n in m.get("tasks_by_status", {}).items():
+        lines.append(f'agent_tasks_total{{status="{st}"}} {n}')
+    lines += ["# HELP agent_llm_calls_total LLM调用总数",
+              "# TYPE agent_llm_calls_total counter",
+              f'agent_llm_calls_total {m.get("llm_calls", 0)}',
+              "# HELP agent_llm_tokens_total token用量",
+              "# TYPE agent_llm_tokens_total counter",
+              f'agent_llm_tokens_total{{kind="prompt"}} {m.get("prompt_tokens", 0)}',
+              f'agent_llm_tokens_total{{kind="completion"}} {m.get("completion_tokens", 0)}',
+              "# HELP agent_llm_latency_p95_ms LLM调用P95时延",
+              "# TYPE agent_llm_latency_p95_ms gauge",
+              f'agent_llm_latency_p95_ms {m.get("llm_latency_p95_ms", 0)}']
+    if "llm_latency_avg_ms" in m:
+        lines.append(f'agent_llm_latency_avg_ms {m["llm_latency_avg_ms"]}')
+    for tool, c in m.get("tool_calls", {}).items():
+        lines.append(f'agent_tool_calls_total{{tool="{tool}",status="ok"}} {c["ok"]}')
+        lines.append(f'agent_tool_calls_total{{tool="{tool}",status="fail"}} {c["fail"]}')
+    for d, n in m.get("approvals", {}).items():
+        lines.append(f'agent_approvals_total{{decision="{d}"}} {n}')
+    return StreamingResponse(iter([ln + "\n" for ln in lines]),
+                             media_type="text/plain; version=0.0.4")
+
+
 @app.get("/api/events")
 async def events(request: Request, session: str):
     s = get_sess(session)
@@ -424,6 +473,7 @@ async def events(request: Request, session: str):
 
 
 REG = core.build_registry()
+TASK_SEM: threading.BoundedSemaphore | None = None  # 全局并发闸门(main里按配置创建)
 
 
 def main():
@@ -443,6 +493,9 @@ def main():
 
     core.set_root(args.cwd)
     CFG = core.load_config()
+    global TASK_SEM
+    TASK_SEM = threading.BoundedSemaphore(
+        int((CFG.get("limits") or {}).get("max_concurrent_tasks", 3)))
     if not args.no_plugins:
         core.load_plugins(REG, CFG)
         try:

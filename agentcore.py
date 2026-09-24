@@ -128,14 +128,20 @@ class LLMClient:
                 f"completion {u['completion_tokens']:,} = {u['total_tokens']:,} tokens")
 
     def chat(self, messages: list, tools: list | None = None) -> dict:
-        """一次模型调用, 返回 assistant 消息 dict. 429/5xx/网络错误自动退避重试."""
+        """一次模型调用, 返回 assistant 消息 dict. 429/5xx/网络错误自动退避重试.
+        全局限流+熔断保护(storage.guard); 每次调用遥测落库(时延/状态/重试)."""
+        import storage
+        br, rl = storage.guard(self.cfg)
+        rl.acquire()
         payload = {"model": self.cfg["model"], "messages": messages,
                    "temperature": self.cfg["temperature"]}
         if tools:
             payload["tools"] = tools
         headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
         last_err = None
+        t0 = time.time()
         for attempt in range(1, 4):
+            br.check()
             try:
                 r = self.session.post(self.endpoint, json=payload, headers=headers,
                                       timeout=self.cfg["request_timeout"])
@@ -145,28 +151,44 @@ class LLMClient:
                     raise _FatalError(f"HTTP {r.status_code}: {r.text[:300]}")
                 data = r.json()
                 self._acc(data.get("usage"))
+                br.record(True)
+                storage.llm_call(self.cfg["model"],
+                                 int((time.time() - t0) * 1000), "ok",
+                                 attempt - 1, data.get("usage"), stream=False)
                 return data["choices"][0]["message"]
-            except _FatalError:
+            except _FatalError as fe:
+                br.record(False)
+                storage.llm_call(self.cfg["model"],
+                                 int((time.time() - t0) * 1000), "fatal",
+                                 attempt - 1, None, stream=False)
                 raise
             except Exception as e:  # 网络/限流/服务端错误 → 重试
                 last_err = e
+                br.record(False)
                 if attempt < 3:
                     wait = 2 ** attempt
                     log(f"  [重试] 第{attempt}次调用失败({e}), {wait}s后重试")
                     time.sleep(wait)
+        storage.llm_call(self.cfg["model"], int((time.time() - t0) * 1000),
+                         "error", 3, None, stream=False)
         raise RuntimeError(f"LLM调用失败(已重试3次): {last_err}")
 
     def chat_stream(self, messages: list, tools: list | None = None,
                     on_delta=None) -> dict:
         """流式调用: 逐token回调 on_delta(text), 结束返回组装好的完整消息.
         tool_calls 的分片按 index 聚合; usage 缺失时按字符粗估并计入."""
+        import storage
+        br, rl = storage.guard(self.cfg)
+        rl.acquire()
         payload = {"model": self.cfg["model"], "messages": messages,
                    "temperature": self.cfg["temperature"], "stream": True}
         if tools:
             payload["tools"] = tools
         headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
         last_err = None
+        t0 = time.time()
         for attempt in range(1, 4):
+            br.check()
             try:
                 r = self.session.post(self.endpoint, json=payload,
                                       headers=headers, stream=True,
@@ -214,22 +236,35 @@ class LLMClient:
                 msg = {"role": "assistant", "content": "".join(content_parts)}
                 if tc_acc:
                     msg["tool_calls"] = [tc_acc[k] for k in sorted(tc_acc)]
+                u_out = usage or {"prompt_tokens": est_tokens(json.dumps(messages, ensure_ascii=False)),
+                                  "completion_tokens": est_tokens(msg["content"] or "")}
+                u_out = dict(u_out)
+                u_out.setdefault("total_tokens",
+                                 u_out.get("prompt_tokens", 0) + u_out.get("completion_tokens", 0))
                 if usage:
                     self._acc(usage)
                 else:  # 流未带usage则粗估(标记为估算口径)
-                    pt = est_tokens(json.dumps(messages, ensure_ascii=False))
-                    ct = est_tokens(msg["content"] or "")
-                    self._acc({"prompt_tokens": pt, "completion_tokens": ct,
-                               "total_tokens": pt + ct})
+                    self._acc(u_out)
+                br.record(True)
+                storage.llm_call(self.cfg["model"],
+                                 int((time.time() - t0) * 1000), "ok",
+                                 attempt - 1, u_out, stream=True)
                 return msg
             except _FatalError:
+                br.record(False)
+                storage.llm_call(self.cfg["model"],
+                                 int((time.time() - t0) * 1000), "fatal",
+                                 attempt - 1, None, stream=True)
                 raise
             except Exception as e:
                 last_err = e
+                br.record(False)
                 if attempt < 3:
                     wait = 2 ** attempt
                     log(f"  [重试] 第{attempt}次流式调用失败({e}), {wait}s后重试")
                     time.sleep(wait)
+        storage.llm_call(self.cfg["model"], int((time.time() - t0) * 1000),
+                         "error", 3, None, stream=True)
         raise RuntimeError(f"LLM流式调用失败(已重试3次): {last_err}")
 
 
@@ -731,7 +766,7 @@ def run_subagent(client: LLMClient, registry: Registry, task: str, cfg: dict,
     if role:
         sp += f"\n# 角色(主agent指定)\n{role}\n请以该角色的专业视角完成任务。"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tr = Transcript(HERE / "sessions" / f"sub_{ts}_{name}.jsonl")
+    tr = Transcript(f"sub_{ts}_{name}")
     history = [{"role": "system", "content": sp}]
     answer = run_task(client, ro, YoloPolicy(), tr, history, task, cfg, emit=None)
     tr.log("end", {"reason": "subagent", **client.usage})
@@ -855,24 +890,49 @@ def maybe_compact(client: LLMClient, history: list, budget: int,
 # ============================================================
 
 class Transcript:
-    """每行一个JSON事件; kind=message 的行用于恢复历史上下文."""
+    """会话持久化(双模): 传 str → SQLite存储(storage.py, 企业化数据层);
+    传 Path → 旧JSONL文件(兼容/测试). 接口一致, 引擎与适配器无感切换."""
 
-    def __init__(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
-        self._fh = open(path, "a", encoding="utf-8")
+    def __init__(self, ident):
+        self._file_mode = isinstance(ident, Path)
+        if self._file_mode:
+            ident.parent.mkdir(parents=True, exist_ok=True)
+            self.path = ident
+            self._fh = open(ident, "a", encoding="utf-8")
+        else:
+            import storage
+            self.session = str(ident)
+            self._impl = storage.SqliteTranscript(self.session)
 
     def log(self, kind: str, data: dict):
-        rec = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind}
-        rec.update(data)
-        self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        self._fh.flush()
+        if self._file_mode:
+            rec = {"ts": datetime.now().isoformat(timespec="seconds"),
+                   "kind": kind}
+            rec.update(data)
+            self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            self._fh.flush()
+        else:
+            self._impl.log(kind, data)
 
     def close(self):
-        self._fh.close()
+        if self._file_mode:
+            self._fh.close()
+
+    def clear(self):
+        if self._file_mode:
+            self.path.unlink(missing_ok=True)
+        else:
+            self._impl.clear()
 
     @staticmethod
-    def load_messages(path: Path) -> list:
+    def load_messages(ident) -> list:
+        if isinstance(ident, Path):
+            return Transcript._patch_dangling(Transcript._load_jsonl(ident))
+        import storage
+        return storage.SqliteTranscript.load_messages(str(ident))
+
+    @staticmethod
+    def _load_jsonl(path: Path) -> list:
         msgs = []
         if not path.exists():
             return msgs
@@ -885,7 +945,7 @@ class Transcript:
                 m = obj["msg"]
                 if m.get("role") != "system":  # system提示每次重新生成
                     msgs.append(m)
-        return Transcript._patch_dangling(msgs)
+        return msgs
 
     @staticmethod
     def _patch_dangling(msgs: list) -> list:
@@ -933,17 +993,25 @@ def run_task(client: LLMClient, registry: Registry, policy,
     emit_end: 分步执行时中间步传False —— task_end 只代表"整个用户任务完成"."""
     emit = emit or (lambda kind, data: None)
     emit("task_start", {"task": task})
+    import storage
+    sess = getattr(transcript, "session", None) or str(
+        getattr(transcript, "path", "?"))
+    storage.task_begin(sess, parent=storage.current_task_id())
     history.append({"role": "user", "content": task})
     transcript.log("message", {"msg": history[-1]})
 
     def _cancelled() -> bool:
         return cancel is not None and cancel.is_set()
 
+    turns_used = 0
     for _turn in range(1, cfg["max_turns"] + 1):
+        turns_used = _turn
         if _cancelled():
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
-            emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            if emit_end:
+                emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            storage.task_end("cancelled", answer, turns_used, client.usage)
             return answer
         maybe_compact(client, history, cfg["context_budget_tokens"], emit)
         try:
@@ -957,6 +1025,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
                 msg = client.chat(history, tools=registry.schemas())
         except _FatalError as e:
             emit("fatal", {"message": f"{e} (请检查config.json的api_key/base_url/model)"})
+            storage.task_end("error", f"[调用失败] {e}", turns_used, client.usage)
             return f"[调用失败-不可重试] {e}"
 
         if (msg.get("content") or "").strip():
@@ -969,6 +1038,8 @@ def run_task(client: LLMClient, registry: Registry, policy,
             answer = (msg.get("content") or "").strip()
             if emit_end:
                 emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            storage.task_end("ok" if answer else "empty", answer,
+                             turns_used, client.usage)
             return answer
 
         for call in calls:
@@ -989,9 +1060,18 @@ def run_task(client: LLMClient, registry: Registry, policy,
                 elif tool is None:
                     result = f"[工具错误] 未注册的工具: {name}"
                 elif policy.allow(tool, kwargs):
+                    if tool.level == "write":
+                        storage.approval(sess, "tool", name, "allowed")
+                    _t0 = time.time()
                     result = clip(registry.execute(name, kwargs))
+                    storage.tool_call(name, tool.level,
+                                      not result.startswith(("[工具错误]", "[参数错误]",
+                                                             "[安全拦截]")),
+                                      int((time.time() - _t0) * 1000))
                 else:
                     emit("permission_denied", {"name": name})
+                    if tool.level == "write":
+                        storage.approval(sess, "tool", name, "denied")
                     result = "[用户拒绝] 本次调用被拒绝, 请换方案或询问用户."
             result = str(result)
             inj = scan_injection(result)
@@ -1005,10 +1085,14 @@ def run_task(client: LLMClient, registry: Registry, policy,
         if _cancelled():
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
-            emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            if emit_end:
+                emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            storage.task_end("cancelled", answer, turns_used, client.usage)
             return answer
 
     emit("max_turns", {})
+    storage.task_end("max_turns",
+                     "(已达最大轮数上限)", turns_used, client.usage)
     return "(已达最大轮数上限, 任务未自然结束; 可提高config的max_turns或拆小任务)"
 
 

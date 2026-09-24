@@ -186,3 +186,17 @@ https://open.bigmodel.cn
 | TC-DC04 | 镜像不含密钥 | auto(CI断言) | CI docker job | config.json 不在镜像层 |
 | TC-DC05 | compose 配置合法 | auto(本地已验) | docker compose config -q | 通过 |
 | TC-DC06 | CI 全流程 | auto | GitHub Actions push 触发 | tests+docker 双绿 |
+
+## M17 企业化三件套(数据层/可用性/可观测性)
+
+| ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
+|---|---|---|---|---|
+| TC-EN01 | SQLite会话往返+悬空修复 | auto | test_enterprise 单测 | 4条含合成tool |
+| TC-EN02 | 旧JSONL回退读取(平滑迁移) | auto | 同上 | 旧会话可恢复 |
+| TC-EN03 | 熔断器触发/半开恢复 | auto | 同上 | 连续失败快速失败→冷却恢复 |
+| TC-EN04 | 限流器有界等待 | auto | 同上 | 超限快速失败 |
+| TC-EN05 | 四表遥测落库 | auto | 同上 | tasks/llm_calls/tool_calls/approvals |
+| TC-EN06 | /api/health + /api/metrics | auto | 同上 E2E | health ok; Prometheus格式 |
+| TC-EN07 | 真实任务后指标增长 | auto | 同上 E2E | llm_calls计数增长+tasks{ok} |
+| TC-EN08 | stats报表 | auto(本地) | python stats.py | 成功率/tokens/P95/工具健康 |
+| TC-EN09 | 并发闸门503 | manual | 两个会话同时发任务(配额1时) | 第二个返回503 |
