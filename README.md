@@ -94,7 +94,7 @@ def register(registry, cfg):
 | `pipeline_alerts` | 读 | **四层流程信号**（权威表口径）：本周新增SKU / 全流程临期（**空运60·海运69**，运输模式取自路线总览）/ 已超期 / 环节停滞超目标（近似段级，目标值动态读《时效确认规则表.xlsx》，Part8 海运按 35 天）；每条带SKU/型号/卡点/剩余天数，可直接用于催办 |
 | `run_route_check` | **写** | 重跑单SKU路线复盘（输出隔离到 agent_tmp，不覆盖正式汇总） |
 
-## 安全模型
+## 权限与沙箱
 
 路径锁在 `--cwd` 沙箱（越界拦截有自检）；只读放行/写确认/`--yolo` 三档；工具输出 8000 字符截断；`max_turns` 防失控；工具异常转文本回灌由模型自愈。
 
@@ -135,6 +135,20 @@ python dingtalk_push.py --title "测试" --text "hello" --dry   # 推送工具(d
 - **无人值守安全**：晨检用只读注册表（写级工具全部摘除），挂计划任务也零副作用
 - **注册每日计划任务**（排在你现有同步任务之后，同一套模式）：`schtasks /Create /TN AgentDailyBrief /TR "python C:\Users\dell\Desktop\Agent\daily_brief.py --push" /SC DAILY /ST 09:35`
 - **推送配置**：钉钉群 → 设置 → 智能群助手 → 添加自定义机器人（一分钟），webhook 填进 config.json 的 `dingtalk_webhook`（加签模式再填 `dingtalk_webhook_secret`；关键词模式建议关键词"简报"）
+
+## Docker 部署
+
+```powershell
+cd C:\Users\dell\Desktop\Agent
+docker compose up -d --build      # 构建+启动(国内源已内置) → http://127.0.0.1:8765
+docker compose logs -f           # 看日志; docker compose down 停止
+```
+
+设计要点：**密钥与数据不进镜像层**（config.json 运行时只读挂载，.dockerignore 双保险，CI 有专项断言）；写沙箱/会话/简报/上传/RAG 索引全部卷化持久；容器内绑定 0.0.0.0、本机仍默认 127.0.0.1；HEALTHCHECK 内置。需要 workmain 插件时按 compose 注释挂载 work-main 目录并把 config 的 `workmain_root` 改为 `/data/work-main`。
+
+## CI（GitHub Actions）
+
+push/PR 到 master 自动跑：**快速层测试**（离线，跳过依赖本地数据的 RAG 套件）+ **镜像构建验证**（并断言 config.json 未打进镜像）。
 
 ## 安全模型
 
