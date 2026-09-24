@@ -139,3 +139,16 @@
 ```
 https://open.bigmodel.cn
 ```
+
+## M13 流式输出 / 写安全网 / Web 原地转向
+
+| ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
+|---|---|---|---|---|
+| TC-ST01 | 流式 delta 事件(CLI逐字/Web实时气泡) | auto | smoke_web + test_safety E2E | assistant_delta 持续到达 |
+| TC-ST02 | write_file 覆盖自动备份 | auto | test_safety 单测 | .trash 落盘, 返回含"可撤销" |
+| TC-ST03 | undo_write 恢复原内容 | auto | 同上 | 内容回到覆盖前 |
+| TC-ST04 | 计划批准附带要求注入 | auto | 单测 + E2E | 历史含[计划附加要求] |
+| TC-ST05 | 分步修改指令原地转向 | auto | test_safety E2E | 指令入历史且影响后续输出(E2E实测"--已转向"写进文件) |
+| TC-ST06 | 多步计划每步都审批 | auto | 同上 | 后续 step_request 均可批准推进 |
+| TC-ST07 | SSE 读端 chunk_size=1 | auto | 各SSE测试 | 小事件即时送达(512字节缓冲坑) |
+| TC-ST08 | 测试订阅器断线重连重放 | auto | test_safety Sub | 连接重置后按 Last-Event-ID 补发 |

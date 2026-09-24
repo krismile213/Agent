@@ -103,7 +103,7 @@ class SSE:
     def _pump(self):
         seq = 0
         try:
-            for line in self.resp.iter_lines(decode_unicode=True):
+            for line in self.resp.iter_lines(chunk_size=1, decode_unicode=True):
                 if not line:
                     continue
                 if line.startswith("id: "):

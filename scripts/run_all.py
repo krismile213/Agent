@@ -29,6 +29,7 @@ FAST = [
 ]
 FULL_EXTRA = [
     ("文件接口", [sys.executable, "scripts/test_files.py"]),
+    ("安全网与转向", [sys.executable, "scripts/test_safety.py"]),
     ("MCP双向", [sys.executable, "scripts/test_mcp.py"]),
     ("Web冒烟(含审批)", [sys.executable, "scripts/smoke_web.py"]),
     ("多轮增强E2E", [sys.executable, "scripts/test_upgrade.py", "--e2e-only"]),

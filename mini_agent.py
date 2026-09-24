@@ -60,6 +60,16 @@ class InteractivePolicy:
 # ============================================================
 
 def cli_emit(kind: str, data: dict):
+    _live = cli_emit._live  # 流式输出状态(跨调用)
+    if kind == "assistant_delta":
+        if not _live["on"]:
+            print("\n[助手] ", end="", flush=True)
+            _live["on"] = True
+        print(data["text"], end="", flush=True)
+        return
+    if _live["on"]:
+        print()
+        _live["on"] = False
     if kind == "assistant":
         print(f"\n[助手] {data['text']}")
     elif kind == "tool_call":
@@ -94,6 +104,9 @@ def cli_emit(kind: str, data: dict):
     elif kind == "max_turns":
         print("[警告] 达到最大轮数上限")
     # task_start/task_end 由调用方按原格式打印
+
+
+cli_emit._live = {"on": False}  # 流式输出状态(跨调用)
 
 
 # ============================================================

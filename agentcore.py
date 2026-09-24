@@ -52,15 +52,17 @@ CONFIG_PATH = HERE / "config.json"
 PLUGINS_DIR = HERE / "plugins"
 
 EXCLUDE_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
-                ".idea", "sessions"}
+                ".idea", "sessions", ".trash"}
 MAX_TOOL_OUTPUT = 8_000        # 单次工具结果回灌模型的字符上限
 MAX_FILE_BYTES = 1_000_000     # grep/read 跳过的单文件大小上限
+TRASH_DIR = HERE / ".trash"    # 写操作安全网: 覆盖前的备份目录
 
 DEFAULTS = {
     "base_url": "https://api.z.ai/api/coding/paas/v4",
     "api_key": "",
     "model": "glm-5.3",
     "temperature": 0.2,
+    "stream": True,                  # 主循环流式输出(逐token回调)
     "max_turns": 30,                 # 单任务最多对话轮数(防失控)
     "context_budget_tokens": 48_000,  # 粗估token超过即触发压缩
     "request_timeout": 120,
@@ -153,6 +155,82 @@ class LLMClient:
                     time.sleep(wait)
         raise RuntimeError(f"LLM调用失败(已重试3次): {last_err}")
 
+    def chat_stream(self, messages: list, tools: list | None = None,
+                    on_delta=None) -> dict:
+        """流式调用: 逐token回调 on_delta(text), 结束返回组装好的完整消息.
+        tool_calls 的分片按 index 聚合; usage 缺失时按字符粗估并计入."""
+        payload = {"model": self.cfg["model"], "messages": messages,
+                   "temperature": self.cfg["temperature"], "stream": True}
+        if tools:
+            payload["tools"] = tools
+        headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                r = self.session.post(self.endpoint, json=payload,
+                                      headers=headers, stream=True,
+                                      timeout=self.cfg["request_timeout"])
+                if r.status_code == 429 or r.status_code >= 500:
+                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+                if r.status_code >= 400:
+                    raise _FatalError(f"HTTP {r.status_code}: {r.text[:300]}")
+                content_parts: list[str] = []
+                tc_acc: dict[int, dict] = {}
+                usage = None
+                with r:
+                    for line in r.iter_lines(decode_unicode=True):
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        u = obj.get("usage")
+                        if isinstance(u, dict) and u.get("total_tokens"):
+                            usage = u
+                        ch = (obj.get("choices") or [{}])[0]
+                        d = ch.get("delta") or {}
+                        c = d.get("content")
+                        if c:
+                            content_parts.append(c)
+                            if on_delta:
+                                on_delta(c)
+                        for td in d.get("tool_calls") or []:
+                            i = int(td.get("index") or 0)
+                            slot = tc_acc.setdefault(
+                                i, {"id": "", "type": "function",
+                                    "function": {"name": "", "arguments": ""}})
+                            if td.get("id"):
+                                slot["id"] = td["id"]
+                            fn = td.get("function") or {}
+                            if fn.get("name"):
+                                slot["function"]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                slot["function"]["arguments"] += fn["arguments"]
+                msg = {"role": "assistant", "content": "".join(content_parts)}
+                if tc_acc:
+                    msg["tool_calls"] = [tc_acc[k] for k in sorted(tc_acc)]
+                if usage:
+                    self._acc(usage)
+                else:  # 流未带usage则粗估(标记为估算口径)
+                    pt = est_tokens(json.dumps(messages, ensure_ascii=False))
+                    ct = est_tokens(msg["content"] or "")
+                    self._acc({"prompt_tokens": pt, "completion_tokens": ct,
+                               "total_tokens": pt + ct})
+                return msg
+            except _FatalError:
+                raise
+            except Exception as e:
+                last_err = e
+                if attempt < 3:
+                    wait = 2 ** attempt
+                    log(f"  [重试] 第{attempt}次流式调用失败({e}), {wait}s后重试")
+                    time.sleep(wait)
+        raise RuntimeError(f"LLM流式调用失败(已重试3次): {last_err}")
+
 
 class _FatalError(RuntimeError):
     """4xx(除429)等不可重试错误."""
@@ -244,12 +322,47 @@ def t_grep(pattern: str, glob: str = "*", max_results: int = 50) -> str:
     return f"扫描{scanned}个文件, 命中{len(hits)}行:\n" + "\n".join(hits)
 
 
+def _backup_original(p: Path) -> str:
+    """写安全网: 覆盖前把原文件备份到 .trash/, 并登记索引(供 undo_write)."""
+    TRASH_DIR.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    bak = TRASH_DIR / f"{ts}_{p.name}"
+    shutil.copy2(p, bak)
+    with open(TRASH_DIR / "index.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": ts, "backup": bak.name,
+                            "original": str(p)}, ensure_ascii=False) + "\n")
+    return bak.name
+
+
 def t_write_file(path: str, content: str) -> str:
     p = safe_path(path)
     existed = p.exists()
+    backup = _backup_original(p) if existed else None
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    return f"已写入 {path} ({len(content.splitlines())}行, {'覆盖已有文件' if existed else '新建'})"
+    msg = f"已写入 {path} ({len(content.splitlines())}行, {'覆盖已有文件' if existed else '新建'}"
+    if backup:
+        msg += f", 原文件已备份 {backup}, 可用 undo_write 撤销"
+    return msg + ")"
+
+
+def t_undo_write() -> str:
+    """撤销最近一次 write_file 覆盖: 从 .trash 恢复原文件."""
+    idx = TRASH_DIR / "index.jsonl"
+    if not idx.exists():
+        return "没有可撤销的备份(仅 write_file 覆盖已有文件时产生)"
+    lines = [ln for ln in idx.read_text("utf-8").splitlines() if ln.strip()]
+    if not lines:
+        return "没有可撤销的备份"
+    rec = json.loads(lines[-1])
+    bak = TRASH_DIR / rec["backup"]
+    if not bak.exists():
+        return f"[工具错误] 备份文件缺失: {rec['backup']}"
+    orig = Path(rec["original"])
+    shutil.copy2(bak, orig)
+    idx.write_text("\n".join(lines[:-1]) + ("\n" if len(lines) > 1 else ""),
+                   encoding="utf-8")
+    return f"已撤销: 恢复 {orig.name} 原内容 (来自备份 {rec['backup']})"
 
 
 def t_run_python(code: str) -> str:
@@ -401,6 +514,11 @@ def build_registry() -> Registry:
             "content": {"type": "string", "description": "完整文件内容"}},
          "required": ["path", "content"]}, "write", t_write_file,
         preview_fn=_preview_write))
+    r.register(Tool(
+        "undo_write", "撤销最近一次 write_file 的覆盖, 从备份恢复原文件(需确认). "
+                      "只回滚最近一次, 不支持连续多次回滚历史.",
+        {"type": "object", "properties": {}, "required": []},
+        "write", t_undo_write))
     r.register(Tool(
         "run_python", "在沙箱目录下运行一段Python代码(120秒超时, 需用户确认). "
                       "适合: 数据统计/pandas处理/批量文件操作. stdout和stderr都会返回.",
@@ -731,9 +849,10 @@ def normalize(msg: dict) -> dict:
 
 def run_task(client: LLMClient, registry: Registry, policy,
              transcript: Transcript, history: list, task: str, cfg: dict,
-             emit=None, cancel=None) -> str:
+             emit=None, cancel=None, emit_end: bool = True) -> str:
     """执行一个任务: 模型→工具→结果回灌→再决策, 直到产出最终回答(或达轮数上限).
-    cancel: 可选 threading.Event, 置位后在轮/工具边界优雅停止(steering 的基础)."""
+    cancel: 可选 threading.Event, 置位后在轮/工具边界优雅停止(steering 的基础).
+    emit_end: 分步执行时中间步传False —— task_end 只代表"整个用户任务完成"."""
     emit = emit or (lambda kind, data: None)
     emit("task_start", {"task": task})
     history.append({"role": "user", "content": task})
@@ -750,7 +869,14 @@ def run_task(client: LLMClient, registry: Registry, policy,
             return answer
         maybe_compact(client, history, cfg["context_budget_tokens"], emit)
         try:
-            msg = client.chat(history, tools=registry.schemas())
+            stream_fn = (client.chat_stream
+                         if cfg.get("stream", True) and hasattr(client, "chat_stream")
+                         else None)
+            if stream_fn is not None:
+                msg = stream_fn(history, tools=registry.schemas(),
+                                on_delta=lambda d: emit("assistant_delta", {"text": d}))
+            else:
+                msg = client.chat(history, tools=registry.schemas())
         except _FatalError as e:
             emit("fatal", {"message": f"{e} (请检查config.json的api_key/base_url/model)"})
             return f"[调用失败-不可重试] {e}"
@@ -763,7 +889,8 @@ def run_task(client: LLMClient, registry: Registry, policy,
         calls = msg.get("tool_calls") or []
         if not calls:
             answer = (msg.get("content") or "").strip()
-            emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            if emit_end:
+                emit("task_end", {"answer": answer, "usage": dict(client.usage)})
             return answer
 
         for call in calls:
@@ -919,19 +1046,33 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
     if cancel is not None and cancel.is_set():
         return run_task(client, registry, policy, transcript, history,
                         task, cfg, emit=emit, cancel=cancel)
+    log("[plan] 生成计划中...")
     plan = propose_plan(client, registry, task, cfg)
+    log(f"[plan] 计划已生成({len(plan)}字符)")
+    if plan:
+        log("[plan] 等待用户批准...")
     if not plan:
         emit("plan_rejected", {"plan": "(计划生成失败, 直接执行)"})
         return run_task(client, registry, policy, transcript, history,
                         task, cfg, emit=emit, cancel=cancel)
     emit("plan", {"plan": plan})
-    if not confirm(plan):
+    res = confirm(plan)
+    if isinstance(res, tuple):          # (批准?, 附加要求文本)
+        ok, extra = bool(res[0]), str(res[1] or "").strip()
+    else:
+        ok, extra = bool(res), ""
+    if not ok:
         emit("plan_rejected", {"plan": plan})
         history.append({"role": "user",
                         "content": "[计划已否决]用户否决了该计划, 任务未执行, "
                                    "等待用户进一步指示:\n" + plan})
         transcript.log("message", {"msg": history[-1]})
         return "[计划被用户否决] 任务未执行。"
+    if extra:
+        history.append({"role": "user",
+                        "content": "[计划附加要求]用户在批准计划时补充:\n" + extra})
+        transcript.log("message", {"msg": history[-1]})
+        emit("plan_extra", {"extra": extra})
     emit("plan_approved", {})
 
     steps = _split_plan_steps(plan) if stepwise else []
@@ -940,11 +1081,16 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
         final = ""
         for i, st in enumerate(steps, 1):
             if cancel is not None and cancel.is_set():
+                emit("plan_stopped", {"at": i, "total": len(steps)})
+                emit("task_end", {"answer": f"[计划在第{i}步前被停止] "
+                                            f"已完成 {i - 1}/{len(steps)} 步.",
+                                  "usage": dict(client.usage)})
                 return (f"[计划在第{i}步前被停止] 已完成 {i - 1}/{len(steps)} 步.")
             ans = run_task(client, registry, policy, transcript, history,
                            f"[计划执行 {i}/{len(steps)}] 原任务: {task[:200]}\n"
                            f"本步只做: {st}\n(完成本步即停, 后续步骤由用户决定是否继续)",
-                           cfg, emit=emit, cancel=cancel)
+                           cfg, emit=emit, cancel=cancel,
+                           emit_end=(i == len(steps)))  # 中间步不发task_end
             final = ans
             emit("step_done", {"step": i, "total": len(steps), "text": st})
             if i < len(steps) and step_confirm is not None:
@@ -956,6 +1102,9 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
                     transcript.log("message", {"msg": history[-1]})
                 if action == "stop":
                     emit("plan_stopped", {"at": i, "total": len(steps)})
+                    emit("task_end", {"answer": f"[计划在第{i}步后按用户要求停止] "
+                                                f"已完成 {i}/{len(steps)} 步.",
+                                      "usage": dict(client.usage)})
                     return (f"[计划在第{i}步后按用户要求停止] 已完成 {i}/{len(steps)} 步.")
         return final or "(计划执行完毕)"
 

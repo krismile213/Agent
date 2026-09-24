@@ -51,7 +51,9 @@ python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
 | **用量统计** | `LLMClient.usage` | cost awareness |
 | **跨会话记忆** | `MEMORY.md` + `save_memory` 工具 | 长期记忆（LLM 可沉淀要点，每次启动注入） |
 | **子agent扇出** | `run_subagent()` + `research` 工具 | Claude Code 的 Explore：并行调查、只读隔离、独立上下文互不污染（线程并行，硬上限 4 任务×15 轮）；**专属角色**（`role` 注入子agent系统提示）+ **工具白名单**（`tools`）；**verify 核查员**逐条验证结论依据 |
-| **计划模式** | `plan_and_run()`（CLI `--plan` / Web 勾选"先出计划"） | plan-then-execute：先出计划 → 审批收件箱批准 → 严格按计划执行；**分步执行**（CLI `--stepwise` / Web 勾选"分步执行"）：每步之间暂停，可继续/停止/输入修改指令（中途转向） |
+| **计划模式** | `plan_and_run()`（CLI `--plan` / Web 勾选"先出计划"） | plan-then-execute：先出计划 → 审批收件箱批准 → 严格按计划执行；**分步执行**（CLI `--stepwise` / Web 勾选"分步执行"）：每步之间暂停，可继续/停止/**带修改指令原地转向**（审批框文本随批准下发） |
+| **流式输出** | `LLMClient.chat_stream`（SSE 逐 token，`assistant_delta` 事件） | 打字机体验；CLI 逐字打印，Web 实时气泡 |
+| **写安全网** | `write_file` 自动备份到 `.trash/` + `undo_write` 工具 | 覆盖前留底，一键撤销最近一次覆盖 |
 | **中断加固** | `Transcript._patch_dangling()` | 被中断的会话自动补合成工具结果，`--resume` 不再报错 |
 | **停止/转向** | `run_task(cancel=...)` + Web 停止按钮 + `/api/stop` | 任务级 interrupt，停止后立即发新指令即 steering |
 | **SSE 断线补发** | 事件 seq 编号 + `Last-Event-ID` 重放（每会话保留最近 500 条） | 刷新/断网不丢事件流 |

@@ -53,6 +53,7 @@ class PendingReq:
         self.ev = threading.Event()
         self.approved = False
         self.always = False
+        self.steer_text = ""  # 批准时附带的修改指令/附加要求
 
 
 class WebPolicy:
@@ -82,13 +83,15 @@ class WebPlanConfirmer:
     def __init__(self, sess: "SessionState"):
         self.sess = sess
 
-    def __call__(self, plan: str) -> bool:
+    def __call__(self, plan: str):
         req = PendingReq("执行计划", plan[:4000])
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("plan_request",
                                   {"id": req.id, "plan": plan[:4000]})
         req.ev.wait()
+        if req.approved and req.steer_text:
+            return True, req.steer_text  # 批准+附加要求(引擎注入历史)
         return req.approved
 
 
@@ -108,7 +111,9 @@ class WebStepConfirmer:
                                   {"id": req.id, "step": i, "total": n,
                                    "text": step_text[:500]})
         req.ev.wait()
-        return ("continue", "") if req.approved else ("stop", "")
+        if req.approved:
+            return "continue", req.steer_text  # 批准+可选修改指令(注入后续步骤)
+        return "stop", ""
 
 
 class SessionState:
@@ -127,10 +132,15 @@ class SessionState:
         self.cancel = threading.Event()    # 任务停止标志
 
     def dispatch(self, ev: dict):
-        """在事件循环线程调用: 编号→留档→扇出给所有SSE订阅者."""
+        """在事件循环线程调用: 编号→留档→扇出给所有SSE订阅者.
+        流式delta不留档(重放时由完整assistant事件代替, 防止重放日志爆炸)."""
         self.seq += 1
         item = (self.seq, ev)
-        self.evlog.append(item)
+        if ev.get("kind") != "assistant_delta":
+            self.evlog.append(item)
+            log_kind = ev.get("kind")
+            if log_kind:
+                core.log(f"[dispatch] {log_kind} seq={self.seq} subs={len(self.subs)}")
         for q in list(self.subs):
             try:
                 q.put_nowait(item)
@@ -167,6 +177,7 @@ class ApproveBody(BaseModel):
     id: str
     approve: bool
     always: bool = False
+    text: str = ""  # 批准时附带的修改指令/附加要求(计划/步骤用)
 
 
 def get_sess(name: str) -> SessionState:
@@ -237,6 +248,8 @@ async def chat(body: ChatBody):
     s.cancel.clear()
     s.running = True
     s.send("running", {"value": True})
+    core.log(f"[work] session={s.name} plan={body.plan} stepwise={body.stepwise} "
+             f"history={len(s.history)}")
 
     def work():
         try:
@@ -292,6 +305,7 @@ async def approve(body: ApproveBody):
         return JSONResponse({"error": "审批请求不存在或已处理"}, 404)
     req.approved = body.approve
     req.always = body.always
+    req.steer_text = (body.text or "").strip()
     req.ev.set()  # 唤醒阻塞中的引擎线程
     s = SESS.get(body.session)
     if s:

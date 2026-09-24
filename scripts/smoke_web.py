@@ -28,7 +28,7 @@ events: queue.Queue = queue.Queue()
 
 def reader():
     with requests.get(f"{BASE}/api/events?session={SESSION}", stream=True, timeout=600) as r:
-        for line in r.iter_lines(decode_unicode=True):
+        for line in r.iter_lines(chunk_size=1, decode_unicode=True):
             if line and line.startswith("data: "):
                 events.put(json.loads(line[6:]))
 
@@ -73,6 +73,8 @@ def main():
             "message": "用 list_dir 看一下当前沙箱目录内容, 一句话总结"}, timeout=10)
         wait_event(lambda e: e["kind"] == "tool_call" and e["name"] == "list_dir", 60)
         print("PASS  只读任务调用了 list_dir")
+        wait_event(lambda e: e["kind"] == "assistant_delta", 60)
+        print("PASS  流式输出(assistant_delta)工作")
         ev = wait_event(lambda e: e["kind"] == "task_end", 180)
         assert ev.get("usage", {}).get("calls", 0) > 0, "task_end 应带用量统计"
         print(f"PASS  只读任务完成 (answer前60字: {ev.get('answer','')[:60]})")

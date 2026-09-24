@@ -70,6 +70,9 @@
   #approve pre { background: #fff; border: 1px solid var(--line); border-radius: 6px;
                  padding: 8px; font-size: 12px; max-height: 220px; overflow: auto;
                  white-space: pre-wrap; margin: 0 0 10px; }
+  #approve textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px;
+                      padding: 6px 8px; font-size: 12.5px; font-family: inherit;
+                      margin-bottom: 10px; outline: none; resize: vertical; }
   #approve .btns { display: flex; gap: 8px; }
   #approve button { padding: 6px 14px; border-radius: 8px; border: 1px solid var(--line);
                     background: #fff; cursor: pointer; font-size: 13px; }
@@ -111,6 +114,8 @@
     <div id="approve">
       <div class="tt">⚠ 需要你审批的写操作</div>
       <pre id="approve_pre"></pre>
+      <textarea id="approve_txt" rows="2"
+        placeholder="修改指令/附加要求(可选): 填写后点'允许'将随批准下发(计划/步骤生效)"></textarea>
       <div class="btns">
         <button class="ok" id="ap_ok">允许</button>
         <button class="always" id="ap_always">本会话总允许</button>
@@ -176,6 +181,12 @@ function showUsage(u) {
     `模型 ${es && es._model || ""} · 调用${u.calls}次 · ${u.total_tokens.toLocaleString()} tokens`;
 }
 
+/* ---------- 实时流式气泡收束 ---------- */
+function endLive() {
+  const lb = $("live");
+  if (lb) lb.removeAttribute("id");
+}
+
 /* ---------- 审批 ---------- */
 function showApprove(ev) {
   pendingId = ev.id;
@@ -183,16 +194,23 @@ function showApprove(ev) {
   $("approve").style.display = "block";
   $("st_left").textContent = `⚠ 等待审批: ${ev.tool}`;
 }
-function hideApprove() { $("approve").style.display = "none"; pendingId = null; }
+function hideApprove() {
+  $("approve").style.display = "none";
+  pendingId = null;
+  if ($("approve_txt")) $("approve_txt").value = "";
+}
 async function approve(decision, always) {
   if (!pendingId) return;
-  const id = pendingId; hideApprove();
+  const id = pendingId;
+  const text = $("approve_txt") ? $("approve_txt").value.trim() : "";
+  hideApprove();
   await fetch("/api/approve", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({session: cur, id, approve: decision, always})});
+    body: JSON.stringify({session: cur, id, approve: decision, always, text})});
 }
 
 /* ---------- 事件路由 ---------- */
 function handle(ev) {
+  if (ev.kind !== "assistant_delta") endLive();   // 非流式事件先收束实时气泡
   switch (ev.kind) {
     case "hello":
       es._model = ev.model;
@@ -203,7 +221,19 @@ function handle(ev) {
       addBubble("user", ev.task);
       setRunning(true);
       break;
-    case "assistant": addBubble("bot", ev.text); break;
+    case "assistant": {
+      const lb = $("live");
+      if (lb) { lb.removeAttribute("id"); }        // 流式已逐字渲染, 只收束
+      else addBubble("bot", ev.text);
+      break;
+    }
+    case "assistant_delta": {
+      let lb = $("live");
+      if (!lb) lb = node('<div class="row bot"><div class="bubble" id="live"></div></div>');
+      lb.appendChild(document.createTextNode(ev.text));
+      const chat = $("chat"); chat.scrollTop = chat.scrollHeight;
+      break;
+    }
     case "tool_call": addToolCard(ev.name, ev.args)._pending = true; break;
     case "tool_result": {
       const pres = document.querySelectorAll("#chat .toolcard pre");
