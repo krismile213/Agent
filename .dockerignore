@@ -1,0 +1,16 @@
+# 密钥/本地数据绝不进镜像层(运行时挂载)
+config.json
+sessions/
+briefs/
+uploads/
+kb_cache/
+.trash/
+eval/sessions/
+eval/reports/
+.git/
+.idea/
+__pycache__/
+*.pyc
+server_diag*.log
+plan_test.md
+hack.txt

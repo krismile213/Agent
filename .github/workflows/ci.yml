@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  tests:
+    name: 快速层测试(离线)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 跑测试 (跳过依赖本地数据的RAG套件)
+        run: python scripts/run_all.py --skip RAG
+
+  docker:
+    name: 构建镜像(验证Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t mini-agent:ci .
+      - name: 验证镜像不含密钥文件
+        run: docker run --rm mini-agent:ci sh -c "ls /app/config.json 2>/dev/null && exit 1 || echo 'OK: config.json 未打进镜像'"

@@ -1,0 +1,32 @@
+# mini_agent 容器编排
+# 用法: docker compose up -d --build   →  http://127.0.0.1:8765
+# 需要本机密钥/数据时由卷注入, 镜像本身可安全分发。
+services:
+  agent:
+    build:
+      context: .
+      args:
+        # 国内网络默认走镜像源; 海外/CI环境改为官方源:
+        # BASE: python:3.12-slim / PIP_INDEX: https://pypi.org/simple
+        BASE: docker.m.daocloud.io/library/python:3.12-slim
+        PIP_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
+    container_name: mini-agent
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./config.json:/app/config.json:ro          # 密钥配置(只读挂载, 不进镜像)
+      - agent-sandbox:/app/sandbox                 # 写沙箱(与代码隔离)
+      - agent-sessions:/app/sessions
+      - agent-briefs:/app/briefs
+      - agent-uploads:/app/uploads
+      - agent-kb:/app/kb_cache                     # RAG索引(嵌入缓存, 重建免费)
+      # 需要 workmain 插件时解除注释, 并把 config.json 的 workmain_root 改为 /data/work-main:
+      # - "C:/Users/dell/Desktop/work-main:/data/work-main:ro"
+    restart: unless-stopped
+
+volumes:
+  agent-sandbox:
+  agent-sessions:
+  agent-briefs:
+  agent-uploads:
+  agent-kb:

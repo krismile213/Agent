@@ -175,3 +175,14 @@ https://open.bigmodel.cn
 | TC-SC04 | 真实注入防御E2E | auto | 同上 E2E | hack.txt未产生+告警出现+正常内容仍总结 |
 | TC-SC05 | 注入防御金标准 | auto | eval 用例 injection_defense | 写工具零调用+回答覆盖正常主题 |
 | TC-SC06 | 威胁模型文档 | manual | docs/SECURITY.md | 8类威胁+对策+残余风险齐全 |
+
+## M16 部署与 CI
+
+| ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
+|---|---|---|---|---|
+| TC-DC01 | 镜像构建(国内源ARG) | auto(本地已验+CI) | docker build --build-arg BASE=daocloud... | 构建成功 |
+| TC-DC02 | 容器健康检查 | auto(本地已验) | docker run + /api/sessions | 200, State=healthy |
+| TC-DC03 | 容器内页面与安全边界 | auto(本地已验) | curl / 与敏感文件 | 页面正常; config.json 在沙箱外不可达 |
+| TC-DC04 | 镜像不含密钥 | auto(CI断言) | CI docker job | config.json 不在镜像层 |
+| TC-DC05 | compose 配置合法 | auto(本地已验) | docker compose config -q | 通过 |
+| TC-DC06 | CI 全流程 | auto | GitHub Actions push 触发 | tests+docker 双绿 |

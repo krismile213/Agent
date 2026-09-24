@@ -434,6 +434,8 @@ def main():
         pass
     ap = argparse.ArgumentParser(description="mini_agent Web前端(FastAPI+SSE+网页审批)")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="绑定地址(默认127.0.0.1仅本机; 容器内用0.0.0.0)")
     ap.add_argument("--cwd", default=os.getcwd(), help="工作沙箱目录(默认当前目录)")
     ap.add_argument("--no-plugins", action="store_true", help="禁用全部插件")
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
@@ -454,7 +456,7 @@ def main():
     print(f"[web] serving on {url}  (Ctrl+C 停止)")
     if not args.no_open:
         threading.Timer(1.2, webbrowser.open, [url]).start()
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
