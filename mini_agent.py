@@ -79,6 +79,8 @@ def cli_emit(kind: str, data: dict):
         print(f"  <- {first}")
     elif kind == "permission_denied":
         print(f"  [拒绝] {data['name']}")
+    elif kind == "injection_suspected":
+        print(f"  [安全] 疑似提示注入已隔离(来源:{data['name']}, 标记:{data['marker']})")
     elif kind == "compact":
         print(f"[压缩] 约{data['tokens']}tokens, 已压缩{data['dropped']}条早期消息")
     elif kind == "plan":

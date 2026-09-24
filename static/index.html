@@ -245,6 +245,7 @@ function handle(ev) {
     case "permission_request": showApprove(ev); break;
     case "permission_resolved": hideApprove(); break;
     case "permission_denied": notice(`已拒绝: ${ev.name}`); break;
+    case "injection_suspected": notice(`🛡 疑似提示注入已隔离(${ev.name}: ${ev.marker})`); break;
     case "plan": addBubble("bot", "📋 执行计划:\n" + ev.plan); break;
     case "plan_request":
       pendingId = ev.id;
