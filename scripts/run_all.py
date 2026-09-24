@@ -26,6 +26,7 @@ FAST = [
     ("反思闭环单测", [sys.executable, "scripts/test_reflect_fix.py"]),
     ("多轮增强单测", [sys.executable, "scripts/test_upgrade.py", "--unit-only"]),
     ("高级能力单测", [sys.executable, "scripts/test_advanced.py", "--unit-only"]),
+    ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),
 ]
 FULL_EXTRA = [
     ("文件接口", [sys.executable, "scripts/test_files.py"]),

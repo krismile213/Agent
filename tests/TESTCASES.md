@@ -152,3 +152,15 @@ https://open.bigmodel.cn
 | TC-ST06 | 多步计划每步都审批 | auto | 同上 | 后续 step_request 均可批准推进 |
 | TC-ST07 | SSE 读端 chunk_size=1 | auto | 各SSE测试 | 小事件即时送达(512字节缓冲坑) |
 | TC-ST08 | 测试订阅器断线重连重放 | auto | test_safety Sub | 连接重置后按 Last-Event-ID 补发 |
+
+## M14 混合检索 RAG
+
+| ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
+|---|---|---|---|---|
+| TC-RG01 | 索引构建(64文件→1842块, 2048维) | auto | 首次 kb_search 自动建/`kb_build` | 状态含"向量启用" |
+| TC-RG02 | recall@5 检索级评测 | auto | test_rag.py | ≥4/5 命中期望来源 |
+| TC-RG03 | 语义泛化(查询不含关键词) | auto | 同上 | top1 命中60天红线文档且向量路参与 |
+| TC-RG04 | 嵌入降级纯BM25 | auto | 同上(模拟) | 仍可命中 |
+| TC-RG05 | 增量嵌入(hash缓存) | manual | 改一篇源文档后 kb_build | 只嵌入新增块(日志可见) |
+| TC-RG06 | LLM重排 | auto | kb_search 实测(已重排标注) | 结果含"已重排" |
+| TC-RG07 | 金标准端到端 | auto | eval 用例 rag_hybrid | 回答含60且来源为kb_search |

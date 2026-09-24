@@ -10,3 +10,4 @@ pandas>=2.0
 openpyxl>=3.1
 rank_bm25>=0.2.2   # search_kb 用; 还需在 work-main 下执行 python agent/kb/build_kb.py 建索引
 jieba>=0.42        # 同上(分词)
+numpy>=1.26          # rag插件向量计算

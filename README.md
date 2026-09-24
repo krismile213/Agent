@@ -47,6 +47,7 @@ python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
 | 上下文管理 | `maybe_compact()` + `AGENT.md` | compaction + CLAUDE.md 项目记忆 |
 | 会话持久化 | `Transcript` | JSONL transcript / `--resume` 恢复 |
 | **插件系统** | `load_plugins()` → `plugins/` | skills / 扩展生态 |
+| **混合检索 RAG** | `plugins/rag.py`（`kb_search` 工具） | BM25+向量双路召回 → RRF 融合 → LLM 重排；语义问法可命中（“最慢允许多久”→60天红线文档）；嵌入按 chunk hash 增量缓存；嵌入不可用自动降级纯 BM25；检索级 recall@5 评测（`test_rag.py`） |
 | **反思** | `reflect()`（CLI `--reflect` / Web 勾选） | self-check / critique |
 | **用量统计** | `LLMClient.usage` | cost awareness |
 | **跨会话记忆** | `MEMORY.md` + `save_memory` 工具 | 长期记忆（LLM 可沉淀要点，每次启动注入） |
@@ -99,12 +100,12 @@ def register(registry, cfg):
 ## 测试体系
 
 ```powershell
-python scripts/run_all.py                    # 快速层(秒级, 不耗token): selftest+全部单测
+python scripts/run_all.py                    # 快速层(秒级): selftest+单测+RAG检索质量
 python scripts/run_all.py --tier full        # 全量: +MCP双向+Web冒烟+各E2E+金标准评测(~15分钟)
 python scripts/run_all.py --tier full --skip mcp,eval   # 按需跳过
 ```
 
-三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，14 用例，含 research 扇出与 plan 模式，断言式判定 + events_contains 事件断言，网络异常单用例重试，报告落 eval/reports/）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，11 个模块约 60 条，每条标注 auto/manual、命令与预期）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
+三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_rag / test_files / test_safety / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，15 用例，含 research 扇出、plan 模式与 RAG 混合检索）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，约 70 条）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
 
 ## MCP 双向接入（工具生态）
 
