@@ -11,8 +11,12 @@ daily_brief.py — 无人值守的每日晨检简报(定时任务入口)
 配合已有体系: 数据同步本身由 work-main/dingtalk 的计划任务负责,
 本脚本只消费其日志与产物, 不重复同步。
 
-Windows 计划任务注册(每天 09:35, 排在同步之后, 复用你现有的任务模式):
-  schtasks /Create /TN AgentDailyBrief /TR "python C:\\Users\\dell\\Agent\\daily_brief.py --push" /SC DAILY /ST 09:35
+Windows 计划任务(已注册, 2026-09-28 核对: \AgentDailyBrief 每日 09:30,
+\AgentDailyBriefPM 每日 14:45, 动作都是 run_brief.bat; 排在上游同步任务
+\DingTalkApprovalSync 的 09:00 / 14:30 之后). 本机 schtasks.exe 被安全策略拦,
+注册/查询一律走 PowerShell:
+  Get-ScheduledTask -TaskName AgentDailyBrief
+  Set-ScheduledTask -TaskName AgentDailyBrief -Trigger (New-ScheduledTaskTrigger -Daily -At "09:30")
 """
 
 import argparse

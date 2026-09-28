@@ -133,7 +133,14 @@ python dingtalk_push.py --title "测试" --text "hello" --dry   # 推送工具(d
 ```
 
 - **无人值守安全**：晨检用只读注册表（写级工具全部摘除），挂计划任务也零副作用
-- **注册每日计划任务**（排在你现有同步任务之后，同一套模式）：`schtasks /Create /TN AgentDailyBrief /TR "python C:\Users\dell\Desktop\Agent\daily_brief.py --push" /SC DAILY /ST 09:35`；**午后版**同理注册 `AgentDailyBriefPM` 于 14:45——脚本按运行时段自动区分（12点后=午后简报，落盘 `<日期>_pm.md` 不覆盖晨检版）
+- **计划任务（已注册，2026-09-28 核对）**：`\AgentDailyBrief` 每日 **09:30**、`\AgentDailyBriefPM` 每日 **14:45**，动作都是 `C:\Users\dell\Desktop\Agent\run_brief.bat`（内部调 `C:\Python314\python.exe daily_brief.py --push`，输出追加到 `briefs/task.log`）。脚本按运行时段自动区分（12 点后=午后简报，落盘 `<日期>_pm.md` 不覆盖晨检版）。两个都排在你的同步任务 `\DingTalkApprovalSync`（09:00 / 14:30）之后。
+- **注册/查状态走 PowerShell**（本机安全策略把 `schtasks.exe` 列入程序黑名单，调用会被拦）：
+
+```powershell
+Get-ScheduledTask -TaskName AgentDailyBrief            # 看触发器与动作
+Get-ScheduledTaskInfo -TaskName AgentDailyBrief        # 看 LastRunTime / LastTaskResult / NextRunTime
+Set-ScheduledTask -TaskName AgentDailyBrief -Trigger (New-ScheduledTaskTrigger -Daily -At "09:30")   # 改时间
+```
 - **推送配置**：钉钉群 → 设置 → 智能群助手 → 添加自定义机器人（一分钟），webhook 填进 config.json 的 `dingtalk_webhook`（加签模式再填 `dingtalk_webhook_secret`；关键词模式建议关键词"简报"）
 
 ## Docker 部署

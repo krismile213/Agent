@@ -13,3 +13,10 @@ uploads/
 .trash/
 kb_cache/
 agent.db*
+
+# 含密钥的本地备份（config.json 本身已排除，备份同样不能进仓库）
+config.json.bak*
+config.backup*.json
+
+# 工作记忆/会话上下文（含内部业务细节，不入库）
+.workbuddy/

@@ -112,8 +112,8 @@
 | TC-D01 | 晨检落盘（只读注册表） | auto | `python daily_brief.py`（已多次真跑） | briefs/<日期>.md 六节结构，摘除写工具日志出现 |
 | TC-D02 | 推送（加签） | auto | `--push`（已真跑） | 群里收到简报 |
 | TC-D03 | 推送 dry 模式 | auto | `python dingtalk_push.py --title t --text x --dry` | 只打印不发送 |
-| TC-D04 | 计划任务存在 | manual | `schtasks /Query /TN AgentDailyBrief` | 下次运行时间 09:45 |
-| TC-D05 | 次日自动推送 | manual | 次日上午观察群与 `briefs/task.log` | 09:45 自动产出并推送 |
+| TC-D04 | 计划任务存在 | manual | `Get-ScheduledTaskInfo -TaskName AgentDailyBrief`（本机 schtasks 被黑名单拦） | 下次运行时间 09:30 |
+| TC-D05 | 次日自动推送 | manual | 次日上午观察群与 `briefs/task.log` | 09:30 自动产出并推送 |
 
 ## M11 评测系统本身
 
