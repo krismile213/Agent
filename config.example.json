@@ -31,6 +31,14 @@
     "path": "agent.db",
     "_说明": "会话/遥测/审计SQLite存储"
   },
+  "auth": {
+    "users": {},
+    "users_sha256": {},
+    "tokens": [],
+    "session_hours": 72,
+    "secret": "",
+    "_说明": "Web登录鉴权(P1): users填 用户名:密码(明文,本文件已被gitignore); users_sha256 填 sha256 hex 更稳妥; tokens 给脚本用(请求头 Authorization: Bearer <token>); 任一非空即启用, 全空=关闭鉴权(本机模式)。启用后各用户的会话互相隔离(用户@会话命名空间), 沙箱文件目录仍共享; secret 不填则每次重启随机生成(重启后需重新登录)。挂公网必须启用。"
+  },
   "limits": {
     "max_concurrent_tasks": 3,
     "llm_rpm": 60,

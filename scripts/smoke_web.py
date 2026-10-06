@@ -53,8 +53,11 @@ def main():
            "--cwd", str(HERE)]
     if "--no-plugins" in sys.argv:
         cmd.append("--no-plugins")
-    proc = subprocess.Popen(cmd, cwd=str(HERE),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import tempfile
+    logf = open(Path(tempfile.gettempdir()) / "smoke_server.log",
+                "w", encoding="utf-8")
+    proc = subprocess.Popen(cmd, cwd=str(HERE), stdout=logf,
+                            stderr=subprocess.STDOUT)
     try:
         for _ in range(60):
             try:
@@ -86,7 +89,8 @@ def main():
         requests.post(f"{BASE}/api/chat", json={
             "session": SESSION, "reflect": False,
             "message": "用 write_file 把内容 'web-smoke-ok' 写到 web_smoke.txt"}, timeout=10)
-        ev = wait_event(lambda e: e["kind"] == "permission_request", 60)
+        # (等待上限180s: LLM决策阶段可能撞免费档429重试链, 与task_end等待同宽)
+        ev = wait_event(lambda e: e["kind"] == "permission_request", 180)
         assert ev["tool"] == "write_file"
         assert "web_smoke.txt" in ev["preview"], "审批预览应包含目标文件与diff"
         print("PASS  收到审批卡片(含diff预览)")
@@ -104,6 +108,7 @@ def main():
         print("[smoke_web] 全部通过 ✓")
     finally:
         proc.terminate()
+        logf.close()
 
 
 if __name__ == "__main__":

@@ -119,7 +119,8 @@
 
 | ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
 |---|---|---|---|---|
-| TC-E01 | 金标准全量（14 用例） | auto | `python eval/run_eval.py` | 14/14，报告落 eval/reports/ |
+| TC-E01 | 金标准全量（23 用例: core/workmain 16 + ability 7） | auto | `python eval/run_eval.py` | 23/23，报告落 eval/reports/ |
+| TC-E01b | 能力套件（ability，带标准答案） | auto | `python eval/run_eval.py --suite ability` | 对账/防幻觉/严格JSON/跨源裁决/裸算力/多文件统计/精确格式 全过 |
 | TC-E02 | 单用例 / 换模型对比 | manual | `--case arith_tool --model glm-5.3` | 报告标注模型名，可比对 |
 | TC-E03 | 网络异常单用例重试不崩 | auto | （2026-09-22 真实触发过） | 该用例重试一次，仍败记 FAIL 继续跑 |
 | TC-E04 | plan/research 纳入回归 | auto | 用例 plan_mode / research_fanout | events_contains 断言生效 |
@@ -200,3 +201,16 @@ https://open.bigmodel.cn
 | TC-EN07 | 真实任务后指标增长 | auto | 同上 E2E | llm_calls计数增长+tasks{ok} |
 | TC-EN08 | stats报表 | auto(本地) | python stats.py | 成功率/tokens/P95/工具健康 |
 | TC-EN09 | 并发闸门503 | manual | 两个会话同时发任务(配额1时) | 第二个返回503 |
+
+## M18 人工干预三件套(追加指令/外发双确认/批量审批)
+
+| ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
+|---|---|---|---|---|
+| TC-HI01 | 追加指令在轮/工具边界注入历史 | auto | test_human_intervention | 第2轮LLM看到[中途追加指令]; 发出instruction_injected事件 |
+| TC-HI02 | Web运行中输入=追加(/api/enqueue) | auto | 同上 | 任务未运行返回400; 运行中入队并最终注入 |
+| TC-HI03 | external两段确认(草稿→发送) | auto | 同上(WebPolicy+CLI双路) | 两段全过才执行; 任一段拒绝即拒绝(无第二段) |
+| TC-HI04 | external不吃"本会话总允许" | auto | 同上 | 即使always置位, sess.always也不收录 |
+| TC-HI05 | 批量审批(/api/approve_batch) | auto | 同上 | 全部置位唤醒引擎线程; 失效id进missing |
+| TC-HI06 | 批量卡片UI + 刷新重建 | manual | Web并行触发两个写任务→"全部允许"; 中途刷新页面 | 卡片堆叠渲染; 批量生效; /api/pending重建未决卡片 |
+| TC-HI07 | 无人值守摘除external工具 | auto | 同上(dingtalk_tool) | 晨检只读注册表不含dingtalk_send |
+| TC-HI08 | dingtalk_send dry_run与真发 | manual | `--yolo "用dingtalk_send dry_run=true检查推送配置"` | dry返回[dry]不实发; 去掉dry_run需两段确认后真实发出 |

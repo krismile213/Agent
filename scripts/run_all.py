@@ -27,6 +27,12 @@ FAST = [
     ("多轮增强单测", [sys.executable, "scripts/test_upgrade.py", "--unit-only"]),
     ("高级能力单测", [sys.executable, "scripts/test_advanced.py", "--unit-only"]),
     ("安全拦截单测", [sys.executable, "scripts/test_security.py", "--unit-only"]),
+    ("人工干预三件套", [sys.executable, "scripts/test_human_intervention.py"]),
+    ("research防幻觉防线", [sys.executable, "scripts/test_research_guard.py"]),
+    ("数据新鲜度防线", [sys.executable, "scripts/test_freshness.py"]),
+    ("Web新增端点", [sys.executable, "scripts/test_web_features.py"]),
+    ("登录鉴权+多用户", [sys.executable, "scripts/test_auth.py"]),
+    ("Web渲染器", ["node", "scripts/test_web_md.js"]),
     ("企业化三件套单测", [sys.executable, "scripts/test_enterprise.py", "--unit-only"]),
     ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),
 ]

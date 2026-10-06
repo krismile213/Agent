@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import sys
 import threading
+import time
 import uuid
 import webbrowser
 from collections import deque
@@ -29,7 +34,8 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from pydantic import BaseModel
 
 import agentcore as core
@@ -40,6 +46,81 @@ SESS: dict[str, "SessionState"] = {}
 PENDING: dict[str, "PendingReq"] = {}
 EVLOG_MAX = 500  # 每会话保留的最近事件数(SSE断线重放窗口)
 MAX_UPLOAD = 50 * 1024 * 1024  # 上传大小上限50MB
+
+# ---------- 登录鉴权(P1): HMAC签名Cookie + 可选静态Bearer + 用户@会话命名空间 ----------
+# config.json → "auth": {"users": {"名": "密码"}, "users_sha256": {"名": "<hex>"},
+#                        "tokens": ["脚本Bearer"], "session_hours": 72, "secret": ""}
+# users/tokens 全空 = 关闭鉴权(本机模式, 行为与旧版完全一致)。
+
+AUTH: dict = {"on": False, "users": {}, "sha": {}, "tokens": set(),
+              "hours": 72, "secret": ""}
+COOKIE = "agent_token"
+SEP = "@"  # 会话命名空间分隔符(用户@会话): @ 在 Windows 文件名合法, 且清洗后的会话名必不含@
+
+
+def setup_auth(cfg: dict) -> dict:
+    """从配置装载鉴权; 任一凭据源非空即启用。secret 不配则随机生成(重启后登录态失效)."""
+    a = cfg.get("auth") or {}
+    AUTH["users"] = {str(k): str(v) for k, v in (a.get("users") or {}).items()
+                     if k and v}
+    AUTH["sha"] = {str(k): str(v).lower() for k, v in
+                   (a.get("users_sha256") or {}).items() if k and v}
+    AUTH["tokens"] = {str(t) for t in (a.get("tokens") or []) if t}
+    AUTH["hours"] = max(1, int(a.get("session_hours") or 72))
+    AUTH["secret"] = str(a.get("secret") or "")
+    AUTH["on"] = bool(AUTH["users"] or AUTH["sha"] or AUTH["tokens"])
+    if AUTH["on"] and not AUTH["secret"]:
+        AUTH["secret"] = secrets.token_hex(32)
+    return AUTH
+
+
+def _sign(b: bytes) -> str:
+    return hmac.new(AUTH["secret"].encode(), b, hashlib.sha256).hexdigest()
+
+
+def make_token(user: str) -> str:
+    payload = json.dumps({"u": user, "exp": int(time.time()) + AUTH["hours"] * 3600},
+                         separators=(",", ":")).encode()
+    b = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    return b + "." + _sign(b.encode())
+
+
+def check_token(tok: str) -> "str | None":
+    """校验签名token(防篡改+防过期), 返回用户名或None."""
+    try:
+        b, sig = tok.rsplit(".", 1)
+        if not hmac.compare_digest(_sign(b.encode()), sig):
+            return None
+        d = json.loads(base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)))
+        return str(d["u"]) if int(d.get("exp") or 0) >= time.time() else None
+    except Exception:
+        return None
+
+
+def verify_login(user: str, pwd: str) -> bool:
+    if user in AUTH["users"]:
+        return hmac.compare_digest(AUTH["users"][user], pwd or "")
+    if user in AUTH["sha"]:
+        return hmac.compare_digest(
+            AUTH["sha"][user],
+            hashlib.sha256((pwd or "").encode()).hexdigest())
+    return False  # 不存在的用户同样走 compare_digest 时间近似
+
+
+def current_user(request: "Request") -> "str | None":
+    """从 Cookie 或 Authorization: Bearer 解出登录身份."""
+    if not AUTH["on"]:
+        return None
+    h = request.headers.get("authorization") or ""
+    if h.startswith("Bearer "):
+        t = h[7:].strip()
+        if t in AUTH["tokens"]:
+            return "token"
+        u = check_token(t)
+        if u:
+            return u
+    ck = request.cookies.get(COOKIE)
+    return check_token(ck) if ck else None
 
 
 class PendingReq:
@@ -57,23 +138,43 @@ class PendingReq:
 
 
 class WebPolicy:
-    """网页权限策略: 只读放行; 写操作推审批卡片并阻塞等待浏览器响应."""
+    """网页权限策略: 只读放行; 写操作推审批卡片并阻塞等待浏览器响应;
+    external级(对外发送)双重确认 —— 第一张卡片确认草稿, 第二张确认实际发送,
+    且不支持"总允许"(对外发送不能有一次放行终身的口子)."""
 
     def __init__(self, sess: "SessionState"):
         self.sess = sess
 
-    def allow(self, tool, kwargs: dict) -> bool:
-        if tool.level == "read" or tool.name in self.sess.always:
-            return True
-        req = PendingReq(tool.name, tool.preview(kwargs))
+    def _ask(self, tool_name: str, preview: str, allow_always: bool) -> "PendingReq":
+        """推一张审批卡片并阻塞等待浏览器响应(返回未pop的req对象)."""
+        import storage
+        req = PendingReq(tool_name, preview)
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("permission_request",
-                                  {"id": req.id, "tool": tool.name,
-                                   "preview": req.preview})
+                                  {"id": req.id, "tool": tool_name,
+                                   "preview": preview})
         req.ev.wait()  # 阻塞引擎线程直到浏览器审批(本地单用户, 不设超时)
-        if req.always:
-            self.sess.always.add(tool.name)
+        storage.approval(self.sess.name, "tool", tool_name,
+                         "allowed" if req.approved else "denied")
+        if allow_always and req.always:
+            self.sess.always.add(tool_name)
+        return req
+
+    def allow(self, tool, kwargs: dict) -> bool:
+        if tool.level == "read" or tool.name in self.sess.always:
+            return True
+        if tool.level == "external":
+            req1 = self._ask(tool.name, tool.preview(kwargs), allow_always=False)
+            if not req1.approved:
+                return False
+            req2 = self._ask(tool.name,
+                             "【第二次确认 · 对外发送】草稿已确认, 即将实际发出"
+                             "(不可撤回):\n" + tool.preview(kwargs)[:1200],
+                             allow_always=False)
+            req2.always = False  # external 不吃"总允许"
+            return req2.approved
+        req = self._ask(tool.name, tool.preview(kwargs), allow_always=True)
         return req.approved
 
 
@@ -137,6 +238,7 @@ class SessionState:
         self.seq = 0                       # 事件流水号(SSE断线重放用)
         self.evlog: deque = deque(maxlen=EVLOG_MAX)
         self.cancel = threading.Event()    # 任务停止标志
+        self.inbox = core.InstructionInbox()  # 任务中途追加指令(轮/工具边界注入)
 
     def dispatch(self, ev: dict):
         """在事件循环线程调用: 编号→留档→扇出给所有SSE订阅者.
@@ -171,6 +273,73 @@ async def _startup():
     LOOP = asyncio.get_running_loop()
 
 
+# ---------- 鉴权中间件(纯ASGI): 除开放清单外全部要求登录; / 未登录跳登录页 ----------
+# ⚠️ 不用 @app.middleware("http")(BaseHTTPMiddleware): 它对 scope/state 的包装
+#    会导致 POST/GET 之间 request.state.user 丢失(实测), 且与 SSE 流式相性差。
+OPEN_PATHS = {"/api/login", "/api/health", "/login"}
+
+
+class AuthGate:
+    """纯 ASGI 鉴权中间件: 身份写入 scope['state']['user'], 端点经 request.state 读."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            user = None
+            if AUTH["on"] and scope["method"] != "OPTIONS" \
+                    and scope["path"] not in OPEN_PATHS:
+                user = current_user(Request(scope))
+                if not user:
+                    if scope["path"] == "/":
+                        resp = RedirectResponse("/login", status_code=307)
+                    else:
+                        resp = JSONResponse({"error": "未登录或登录已过期"}, 401)
+                    await resp(scope, receive, send)
+                    return
+            scope.setdefault("state", {})["user"] = user
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(AuthGate)
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str = ""
+
+
+@app.post("/api/login")
+async def login(body: LoginBody):
+    if not AUTH["on"]:  # 未启用鉴权: 空实现保兼容
+        return {"ok": True, "user": None}
+    u = body.username.strip()
+    if not verify_login(u, body.password):
+        return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
+    resp = JSONResponse({"ok": True, "user": u})
+    resp.set_cookie(COOKIE, make_token(u), max_age=AUTH["hours"] * 3600,
+                    httponly=True, samesite="lax")
+    return resp
+
+
+@app.post("/api/logout")
+async def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE)
+    return resp
+
+
+@app.get("/api/me")
+async def me(request: Request):
+    return {"user": getattr(request.state, "user", None), "auth": AUTH["on"]}
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(core.HERE / "static" / "login.html")
+
+
 class ChatBody(BaseModel):
     session: str
     message: str
@@ -188,10 +357,24 @@ class ApproveBody(BaseModel):
 
 
 def get_sess(name: str) -> SessionState:
-    name = "".join(c for c in name.strip() if c.isalnum() or c in "-_") or "web"
+    """入参应为已清洗并绑定用户的会话id(一律经 _scope 产出)."""
     if name not in SESS:
         SESS[name] = SessionState(name)
     return SESS[name]
+
+
+def _scope(request: "Request", name: str) -> str:
+    """把请求里的会话名绑定到当前登录用户的命名空间 —— 多用户隔离的唯一收口."""
+    name = "".join(c for c in (name or "").strip() if c.isalnum() or c in "-_") or "web"
+    if AUTH["on"]:
+        u = getattr(request.state, "user", None)
+        if u:
+            return f"{u}{SEP}{name}"
+    return name
+
+
+def _sess_file(sid: str) -> Path:
+    return core.HERE / "sessions" / f"{sid}.jsonl"
 
 
 @app.get("/")
@@ -200,22 +383,54 @@ async def index():
 
 
 @app.get("/api/sessions")
-async def list_sessions():
-    out = []
+async def list_sessions(request: Request):
+    """会话列表 = SQLite主存储 ∪ 旧JSONL(按最近活动排序).
+    顺带修复: 旧版只扫 jsonl, SQLite 会话重启后从侧栏消失.
+    鉴权开启时按 用户@会话 命名空间过滤; brief_* 为定时简报机生会话, 不入侧栏."""
+    out: dict = {}
+    prefix = f"{request.state.user}{SEP}" if AUTH["on"] else ""
+
+    def visible(sid: str) -> bool:
+        if sid.startswith("brief_"):
+            return False
+        return sid.startswith(prefix) if AUTH["on"] else SEP not in sid
+
+    try:
+        import storage
+        for r in storage.get_db().execute(
+                "SELECT session s, MAX(ts) m, COUNT(*) n FROM messages "
+                "GROUP BY session"):
+            sid = r["s"] or ""
+            if not visible(sid):
+                continue
+            try:
+                mt = datetime.fromisoformat(str(r["m"])).timestamp()
+            except Exception:
+                mt = 0.0
+            out[sid] = {"_mt": mt, "size": int(r["n"]),
+                        "name": sid.split(SEP, 1)[1] if SEP in sid else sid,
+                        "mtime": datetime.fromtimestamp(mt).strftime("%m-%d %H:%M")
+                        if mt else ""}
+    except Exception:
+        pass
     d = core.HERE / "sessions"
     if d.is_dir():
-        for f in sorted(d.glob("*.jsonl"),
-                        key=lambda p: p.stat().st_mtime, reverse=True):
+        for f in d.glob("*.jsonl"):
+            sid = f.stem
+            if not visible(sid):
+                continue
             st = f.stat()
-            out.append({"name": f.stem,
-                        "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M"),
-                        "size": st.st_size})
-    return out
+            if sid not in out or out[sid]["_mt"] < st.st_mtime:
+                out[sid] = {"_mt": float(st.st_mtime), "size": st.st_size,
+                            "name": sid.split(SEP, 1)[1] if SEP in sid else sid,
+                            "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M")}
+    return [{k: v for k, v in o.items() if k != "_mt"}
+            for o in sorted(out.values(), key=lambda x: x["_mt"], reverse=True)]
 
 
 @app.get("/api/sessions/{name}/history")
-async def session_history(name: str):
-    s = get_sess(name)
+async def session_history(request: Request, name: str):
+    s = get_sess(_scope(request, name))
     items = []
     for m in s.history[1:]:
         r = m.get("role")
@@ -246,10 +461,10 @@ class StopBody(BaseModel):
 
 
 @app.post("/api/chat")
-async def chat(body: ChatBody):
-    s = get_sess(body.session)
+async def chat(body: ChatBody, request: Request):
+    s = get_sess(_scope(request, body.session))
     if s.running:
-        return JSONResponse({"error": "该会话有任务正在运行, 请等待完成或点停止"}, 409)
+        return JSONResponse({"error": "该会话有任务正在运行: 可直接输入追加指令(不打断执行), 或点停止后再发新任务"}, 409)
     if not body.message.strip():
         return JSONResponse({"error": "消息为空"}, 400)
     if TASK_SEM is not None and not TASK_SEM.acquire(blocking=False):
@@ -270,15 +485,18 @@ async def chat(body: ChatBody):
                                            emit=s.emit_threadsafe, cancel=s.cancel,
                                            stepwise=body.stepwise,
                                            step_confirm=WebStepConfirmer(s)
-                                           if body.stepwise else None)
+                                           if body.stepwise else None,
+                                           inject=s.inbox)
             else:
                 answer = core.run_task(s.client, REG, WebPolicy(s), s.transcript,
                                        s.history, body.message, CFG,
-                                       emit=s.emit_threadsafe, cancel=s.cancel)
+                                       emit=s.emit_threadsafe, cancel=s.cancel,
+                                       inject=s.inbox)
             if body.reflect and answer and not answer.startswith(("[", "(")):
                 core.reflect_and_fix(s.client, REG, WebPolicy(s), s.transcript,
                                      s.history, start, answer, CFG,
-                                     emit=s.emit_threadsafe, cancel=s.cancel)
+                                     emit=s.emit_threadsafe, cancel=s.cancel,
+                                     inject=s.inbox)
         except Exception as e:  # 引擎级异常兜底, 释放会话
             s.emit_threadsafe("fatal", {"message": f"{type(e).__name__}: {e}"})
         finally:
@@ -293,15 +511,16 @@ async def chat(body: ChatBody):
 
 
 @app.post("/api/stop")
-async def stop(body: StopBody):
+async def stop(body: StopBody, request: Request):
     """停止正在运行的任务: 引擎在轮/工具边界优雅退出;
     若有未决审批, 一并按拒绝解决(解除引擎线程阻塞)."""
-    s = SESS.get(body.session)
+    sid = _scope(request, body.session)
+    s = SESS.get(sid)
     stopping = False
     if s and s.running:
         stopping = True
         s.cancel.set()
-        for rid in [r for r, v in PENDING.items() if v.session == body.session]:
+        for rid in [r for r, v in PENDING.items() if v.session == sid]:
             req = PENDING.pop(rid)
             req.approved = False
             req.ev.set()
@@ -310,17 +529,77 @@ async def stop(body: StopBody):
 
 
 @app.post("/api/approve")
-async def approve(body: ApproveBody):
-    req = PENDING.pop(body.id, None)
-    if req is None:
+async def approve(body: ApproveBody, request: Request):
+    sid = _scope(request, body.session)
+    req = PENDING.get(body.id)
+    if req is None or req.session != sid:  # 不存在/不属于当前用户(含跨用户)一律404
         return JSONResponse({"error": "审批请求不存在或已处理"}, 404)
+    PENDING.pop(body.id)
     req.approved = body.approve
     req.always = body.always
     req.steer_text = (body.text or "").strip()
     req.ev.set()  # 唤醒阻塞中的引擎线程
-    s = SESS.get(body.session)
+    s = SESS.get(sid)
     if s:
         s.send("permission_resolved", {"id": body.id, "approved": body.approve})
+    return {"ok": True}
+
+
+class BatchApproveBody(BaseModel):
+    session: str
+    ids: list[str]
+    approve: bool
+    text: str = ""
+
+
+@app.post("/api/approve_batch")
+async def approve_batch(body: BatchApproveBody, request: Request):
+    """批量审批: 一次解决同会话的多个待决请求(逐个唤醒阻塞的引擎线程).
+    missing 返回已失效的id(引擎侧已解决, 如点过停止)."""
+    sid = _scope(request, body.session)
+    s = SESS.get(sid)
+    resolved, missing = [], []
+    for rid in body.ids:
+        req = PENDING.pop(rid, None)
+        if req is None or req.session != sid:
+            missing.append(rid)
+            continue
+        req.approved = body.approve
+        req.always = False  # 批量操作不授予"总允许"
+        req.steer_text = (body.text or "").strip()
+        req.ev.set()
+        resolved.append(rid)
+        if s:
+            s.send("permission_resolved", {"id": rid, "approved": body.approve})
+    return {"ok": True, "resolved": resolved, "missing": missing}
+
+
+@app.get("/api/pending")
+async def list_pending(request: Request, session: str):
+    """当前会话未决审批清单 —— 前端刷新/换会话后据此重建审批卡片."""
+    sid = _scope(request, session)
+    return {"items": [{"id": r.id, "tool": r.tool_name, "preview": r.preview}
+                      for r in PENDING.values() if r.session == sid]}
+
+
+class InjectBody(BaseModel):
+    session: str
+    text: str
+
+
+@app.post("/api/enqueue")
+async def enqueue(body: InjectBody, request: Request):
+    """任务运行中追加指令: 不打断执行, 引擎在轮/工具边界自动注入历史.
+    (任务未运行时报错 —— 那种情况直接走 /api/chat 发新任务)"""
+    sid = _scope(request, body.session)
+    s = SESS.get(sid)
+    text = (body.text or "").strip()
+    if not text:
+        return JSONResponse({"error": "指令为空"}, 400)
+    if not s or not s.running:
+        return JSONResponse({"error": "任务未在运行, 直接发送即可"}, 400)
+    s.inbox.add(text)
+    s.send("instruction_queued", {"text": text[:200]})
     return {"ok": True}
 
 
@@ -397,6 +676,70 @@ async def download_file(path: str):
     return FileResponse(p, filename=p.name)
 
 
+@app.get("/api/files/raw")
+async def raw_file(path: str):
+    """内联预览(无 Content-Disposition 附件头): 前端产物预览抽屉用. 同样的敏感/穿越拦截."""
+    try:
+        p = core.safe_path(path)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, 400)
+    if not p.is_file():
+        return JSONResponse({"error": f"文件不存在: {path}"}, 404)
+    if _sensitive(p):
+        return JSONResponse({"error": "该文件含敏感信息, 禁止预览"}, 403)
+    return FileResponse(p)  # 不带 filename → 浏览器按扩展名内联渲染
+
+
+class RenameBody(BaseModel):
+    new: str
+
+
+def _clean_session_name(name: str) -> str:
+    return "".join(c for c in name.strip() if c.isalnum() or c in "-_")
+
+
+@app.post("/api/sessions/{name}/rename")
+async def rename_session(request: Request, name: str, body: RenameBody):
+    sid = _scope(request, name)
+    s = SESS.get(sid)
+    if s and s.running:
+        return JSONResponse({"error": "任务运行中, 暂不能重命名"}, 409)
+    new = _clean_session_name(body.new)
+    if not new:
+        return JSONResponse({"error": "新名称为空"}, 400)
+    src = _sess_file(sid)
+    dst = _sess_file(_scope(request, new))
+    if not src.exists():
+        return JSONResponse({"error": f"会话不存在: {name}"}, 404)
+    if new != name and dst.exists():
+        return JSONResponse({"error": f"目标会话名已存在: {new}"}, 409)
+    src.rename(dst)
+    if sid in SESS and not SESS[sid].running:
+        SESS.pop(sid, None)  # 已加载的状态按旧名失效, 下次打开按新名重建
+    return {"ok": True, "name": new}
+
+
+@app.delete("/api/sessions/{name}")
+async def delete_session(request: Request, name: str):
+    sid = _scope(request, name)
+    s = SESS.get(sid)
+    if s and s.running:
+        return JSONResponse({"error": "任务运行中, 暂不能删除"}, 409)
+    f = _sess_file(sid)
+    if not f.exists():
+        return JSONResponse({"error": f"会话不存在: {name}"}, 404)
+    f.unlink()
+    SESS.pop(sid, None)
+    try:  # 遥测镜像同步清理(失败不影响主功能)
+        import storage
+        db = storage.get_db()
+        db.execute("DELETE FROM messages WHERE session=?", (sid,))
+        db.commit()
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 @app.get("/api/health")
 async def health():
     """健康检查(容器/负载均衡探针)."""
@@ -437,7 +780,7 @@ async def metrics():
 
 @app.get("/api/events")
 async def events(request: Request, session: str):
-    s = get_sess(session)
+    s = get_sess(_scope(request, session))
     try:
         last_id = int(request.headers.get("last-event-id") or 0)
     except ValueError:
@@ -493,6 +836,7 @@ def main():
 
     core.set_root(args.cwd)
     CFG = core.load_config()
+    setup_auth(CFG)
     global TASK_SEM
     TASK_SEM = threading.BoundedSemaphore(
         int((CFG.get("limits") or {}).get("max_concurrent_tasks", 3)))
@@ -506,6 +850,7 @@ def main():
 
     url = f"http://127.0.0.1:{args.port}"
     print(f"[web] model={CFG['model']} 沙箱={core.ROOT} 工具={len(REG.names())}个")
+    print(f"[web] 鉴权: {'启用(用户数 %d, 未配secret则重启后需重新登录)' % len(AUTH['users']) if AUTH['on'] else '未启用(本机模式; 上网前在 config.json 配置 auth.users)'}")
     print(f"[web] serving on {url}  (Ctrl+C 停止)")
     if not args.no_open:
         threading.Timer(1.2, webbrowser.open, [url]).start()

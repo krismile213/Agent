@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · mini_agent</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         font-family:"PingFang SC","Microsoft YaHei",sans-serif; background:#f3f4f6; }
+  .card { background:#fff; padding:36px 40px; border-radius:14px;
+          box-shadow:0 10px 40px rgba(0,0,0,.12); width:300px; }
+  .card h1 { font-size:20px; margin:0 0 6px; color:#111827; }
+  .sub { font-size:12px; color:#6b7280; margin-bottom:22px; }
+  label { display:block; font-size:12px; color:#374151; margin:12px 0 4px; }
+  input { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid #d1d5db;
+          border-radius:8px; font-size:14px; background:#fff; color:#111827; }
+  input:focus { outline:2px solid #93c5fd; border-color:#2563eb; }
+  button { width:100%; margin-top:20px; padding:11px; border:0; border-radius:8px;
+           background:#2563eb; color:#fff; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #err { color:#b91c1c; font-size:12.5px; min-height:18px; margin-top:12px; text-align:center; }
+  @media (prefers-color-scheme: dark) {
+    body { background:#0b1220; }
+    .card { background:#111a2e; box-shadow:0 10px 40px rgba(0,0,0,.5); }
+    .card h1 { color:#e5e7eb; }
+    label { color:#9ca3af; }
+    input { background:#0b1220; border-color:#334155; color:#e5e7eb; }
+  }
+</style>
+</head>
+<body>
+  <form class="card" id="f">
+    <h1>mini_agent</h1>
+    <div class="sub">请登录以继续</div>
+    <label for="u">用户名</label>
+    <input id="u" autocomplete="username" autofocus>
+    <label for="p">密码</label>
+    <input id="p" type="password" autocomplete="current-password">
+    <button id="go" type="submit">登 录</button>
+    <div id="err"></div>
+  </form>
+<script>
+  document.getElementById("f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const b = document.getElementById("go"), err = document.getElementById("err");
+    b.disabled = true; err.textContent = "";
+    try {
+      const r = await fetch("/api/login", {method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({username: document.getElementById("u").value.trim(),
+                              password: document.getElementById("p").value})});
+      if (r.ok) { location.href = "/"; return; }
+      err.textContent = r.status === 401 ? "用户名或密码错误" : ("登录失败 (" + r.status + ")");
+    } catch (ex) { err.textContent = "网络错误: " + ex; }
+    b.disabled = false;
+  });
+</script>
+</body>
+</html>
