@@ -45,12 +45,16 @@ def unit_memory():
     import agentcore as core
     core.set_root(HERE)
     reg = core.build_registry()
-    mem = HERE / "MEMORY.md"
+    mem = core.MEM_LONG  # 分层记忆: memory/MEMORY.md(精华) + memory/log/(流水)
     backup = mem.read_text("utf-8") if mem.exists() else None
+    log_today = core.MEM_LOG / f"{__import__('datetime').datetime.now():%Y-%m-%d}.md"
+    log_backup = log_today.read_text("utf-8") if log_today.exists() else None
     try:
         r = reg.execute("save_memory", {"content": "测试记忆条目-可删除"})
         check("save_memory 写入", "已记入" in r and mem.exists()
               and "测试记忆条目-可删除" in mem.read_text("utf-8"))
+        check("save_memory 双写当天日志", log_today.exists()
+              and "测试记忆条目-可删除" in log_today.read_text("utf-8"))
         prompt = core.build_system_prompt()
         check("MEMORY.md 注入系统提示", "跨会话记忆" in prompt and "测试记忆条目-可删除" in prompt)
     finally:
@@ -58,6 +62,10 @@ def unit_memory():
             mem.unlink(missing_ok=True)
         else:
             mem.write_text(backup, encoding="utf-8")
+        if log_backup is None:
+            log_today.unlink(missing_ok=True)
+        else:
+            log_today.write_text(log_backup, encoding="utf-8")
 
 
 def unit_dangling():

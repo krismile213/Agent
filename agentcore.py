@@ -511,12 +511,59 @@ def wrap_tool_result(name: str, result: str, injection: str | None = None) -> st
             f"{body}\n</untrusted_data>")
 
 
+# ---------- 分层记忆: memory/MEMORY.md(精华,注入提示) + memory/log/日期.md(流水) ----------
+
+MEM_DIR = HERE / "memory"
+MEM_LONG = MEM_DIR / "MEMORY.md"
+MEM_LOG = MEM_DIR / "log"
+
+
+def _ensure_mem() -> None:
+    """确保 memory/ 结构存在; 兼容迁移: 旧版根目录 MEMORY.md → memory/MEMORY.md."""
+    if (HERE / "MEMORY.md").exists() and not MEM_LONG.exists():
+        MEM_DIR.mkdir(parents=True, exist_ok=True)
+        (HERE / "MEMORY.md").rename(MEM_LONG)
+    MEM_LOG.mkdir(parents=True, exist_ok=True)
+
+
+def _today_log() -> Path:
+    return MEM_LOG / f"{datetime.now():%Y-%m-%d}.md"
+
+
 def t_save_memory(content: str) -> str:
-    """跨会话记忆: 追加到 agent 主目录的 MEMORY.md, 每次启动注入系统提示."""
-    line = f"- [{datetime.now().strftime('%Y-%m-%d')}] {content.strip()}"
-    with open(HERE / "MEMORY.md", "a", encoding="utf-8") as f:
+    """跨会话记忆(双写): 精华行进 memory/MEMORY.md(每次启动注入系统提示),
+    同时带时间戳记入 memory/log/当天.md(工作流水, 可用 recall_memory 查)."""
+    _ensure_mem()
+    line = f"- [{datetime.now():%Y-%m-%d}] {content.strip()}"
+    with open(MEM_LONG, "a", encoding="utf-8") as f:
         f.write(line + "\n")
-    return f"已记入跨会话记忆 MEMORY.md: {line}"
+    with open(_today_log(), "a", encoding="utf-8") as f:
+        f.write(f"[{datetime.now():%H:%M}] {content.strip()}\n")
+    return (f"已记入跨会话记忆 memory/MEMORY.md: {line} "
+            f"(同时记入日志 {_today_log().name})")
+
+
+def t_recall_memory(target: str = "recent") -> str:
+    """按需检索记忆: target='recent' 最近7天工作日志; 'YYYY-MM-DD' 指定某天日志;
+    'all' 长期记忆(MEMORY.md)全文. 只读."""
+    _ensure_mem()
+    target = (target or "recent").strip()
+    if target == "all":
+        if not MEM_LONG.exists():
+            return "(长期记忆为空)"
+        return clip("# memory/MEMORY.md(长期记忆)\n"
+                    + MEM_LONG.read_text("utf-8", errors="replace"), 4_000)
+    if target != "recent":
+        p = MEM_LOG / f"{target}.md"
+        if not p.exists():
+            return f"(无 {target} 的日志; 可用 target='recent' 看最近7天)"
+        return clip(f"# {p.name}\n" + p.read_text("utf-8", errors="replace"), 4_000)
+    # recent: 最近7天, 新的在前
+    days = sorted(MEM_LOG.glob("*.md"), reverse=True)[:7]
+    if not days:
+        return "(最近7天无工作日志)"
+    parts = [f"# {p.name}\n" + p.read_text("utf-8", errors="replace") for p in days]
+    return clip("\n\n".join(parts), 8_000)
 
 
 # ---------- 对外发送: external 级(双确认), 复用 dingtalk_push 的群机器人通道 ----------
@@ -701,11 +748,20 @@ def build_registry() -> Registry:
             "code": {"type": "string", "description": "要执行的Python代码"}},
          "required": ["code"]}, "write", t_run_python))
     r.register(Tool(
-        "save_memory", "把一条重要结论/用户偏好/踩过的坑写入跨会话记忆(MEMORY.md, "
-                       "之后所有会话都可见, 需确认). 只记要点, 一条一行, 不要记敏感数据.",
+        "save_memory", "把一条重要结论/用户偏好/踩过的坑写入跨会话记忆(双写: 精华进"
+                       "memory/MEMORY.md 每次会话注入提示, 流水进当天日志; 需确认). "
+                       "只记要点, 一条一行, 不要记敏感数据.",
         {"type": "object", "properties": {
             "content": {"type": "string", "description": "要记住的要点, 一句话"}},
          "required": ["content"]}, "write", t_save_memory))
+    r.register(Tool(
+        "recall_memory", "检索跨会话记忆/历史工作日志(只读). 用于回忆之前会话做过什么、"
+                         "当时怎么解决的. target: 'recent'=最近7天日志(默认), "
+                         "'YYYY-MM-DD'=指定某天, 'all'=长期记忆MEMORY.md全文.",
+        {"type": "object", "properties": {
+            "target": {"type": "string",
+                       "description": "'recent' / 'YYYY-MM-DD' / 'all'"}},
+         "required": []}, "read", t_recall_memory))
     r.register(Tool(
         "dingtalk_send",
         "把markdown消息推送到钉钉群机器人(对外发送, 不可撤回; 需用户双重确认:"
@@ -795,10 +851,13 @@ def build_system_prompt() -> str:
 def _memory_block() -> str:
     """跨会话记忆 + 项目记忆的注入块(主agent与子agent共用)."""
     block = ""
-    mem = HERE / "MEMORY.md"
-    if mem.exists():
-        block += ("\n# 跨会话记忆(MEMORY.md, 历次会话沉淀的要点, 优先级高于一般常识)\n"
-                  + clip(mem.read_text("utf-8", errors="replace"), 4_000))
+    try:
+        _ensure_mem()
+    except OSError:
+        pass
+    if MEM_LONG.exists():
+        block += ("\n# 跨会话记忆(memory/MEMORY.md, 历次会话沉淀的要点, 优先级高于一般常识)\n"
+                  + clip(MEM_LONG.read_text("utf-8", errors="replace"), 4_000))
     am = ROOT / "AGENT.md"
     if am.exists():
         block += ("\n# 项目记忆(AGENT.md, 用户维护的业务口径, 优先级高于一般常识)\n"
@@ -1158,6 +1217,52 @@ def _drain_inbox(inject, history: list, transcript: Transcript, emit) -> None:
         emit("instruction_injected", {"text": clip(text, 200)})
 
 
+# ---------- 断点续跑: 会话级 checkpoint(轮边界落盘, 进程崩溃自然残留) ----------
+
+def _ckpt_path(sess: str) -> Path:
+    safe = "".join(c for c in sess if c.isalnum() or c in "-_@") or "web"
+    return HERE / "sessions" / f"{safe}.ckpt.json"
+
+
+def write_checkpoint(sess: str, task: str, turn: int = 0) -> None:
+    """记录"该会话有个任务跑到第几轮". 进程正常结束由 run_task 清除;
+    崩溃/被杀则残留 → list_checkpoints 能发现, 即'中断待续跑'."""
+    try:
+        p = _ckpt_path(sess)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(
+            {"session": sess, "task": task, "turn": turn,
+             "ts": datetime.now().isoformat(timespec="seconds")},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # checkpoint 是尽力而为, 不因落盘失败打断任务
+
+
+def clear_checkpoint(sess: str) -> None:
+    try:
+        _ckpt_path(sess).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def list_checkpoints() -> list:
+    """全部中断残留(含损坏文件自清理)."""
+    out = []
+    d = HERE / "sessions"
+    if not d.is_dir():
+        return out
+    for p in d.glob("*.ckpt.json"):
+        try:
+            obj = json.loads(p.read_text("utf-8"))
+            if isinstance(obj, dict) and obj.get("session"):
+                out.append(obj)
+            else:
+                p.unlink(missing_ok=True)
+        except Exception:
+            p.unlink(missing_ok=True)
+    return sorted(out, key=lambda c: c.get("ts", ""), reverse=True)
+
+
 def run_task(client: LLMClient, registry: Registry, policy,
              transcript: Transcript, history: list, task: str, cfg: dict,
              emit=None, cancel=None, emit_end: bool = True,
@@ -1172,6 +1277,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
     sess = getattr(transcript, "session", None) or str(
         getattr(transcript, "path", "?"))
     storage.task_begin(sess, parent=storage.current_task_id())
+    write_checkpoint(sess, task, 0)  # 断点续跑: 起点落盘, 正常出口清除, 崩溃残留
     history.append({"role": "user", "content": task})
     transcript.log("message", {"msg": history[-1]})
 
@@ -1181,7 +1287,9 @@ def run_task(client: LLMClient, registry: Registry, policy,
     turns_used = 0
     for _turn in range(1, cfg["max_turns"] + 1):
         turns_used = _turn
+        write_checkpoint(sess, task, _turn)  # 轮边界刷新进度
         if _cancelled():
+            clear_checkpoint(sess)
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
             if emit_end:
@@ -1202,6 +1310,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
         except _FatalError as e:
             emit("fatal", {"message": f"{e} (请检查config.json的api_key/base_url/model)"})
             storage.task_end("error", f"[调用失败] {e}", turns_used, client.usage)
+            clear_checkpoint(sess)
             return f"[调用失败-不可重试] {e}"
 
         if (msg.get("content") or "").strip():
@@ -1211,6 +1320,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
 
         calls = msg.get("tool_calls") or []
         if not calls:
+            clear_checkpoint(sess)
             answer = (msg.get("content") or "").strip()
             if emit_end:
                 emit("task_end", {"answer": answer, "usage": dict(client.usage)})
@@ -1260,6 +1370,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
 
         _drain_inbox(inject, history, transcript, emit)  # 工具间隙检查点
         if _cancelled():
+            clear_checkpoint(sess)
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
             if emit_end:
@@ -1268,6 +1379,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
             return answer
 
     emit("max_turns", {})
+    clear_checkpoint(sess)
     storage.task_end("max_turns",
                      "(已达最大轮数上限)", turns_used, client.usage)
     return "(已达最大轮数上限, 任务未自然结束; 可提高config的max_turns或拆小任务)"

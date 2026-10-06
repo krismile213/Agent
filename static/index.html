@@ -40,6 +40,13 @@
   .sess:hover .sa { display: flex; }
   .sess .sa button { border: 0; background: transparent; color: var(--muted); cursor: pointer;
                      font-size: 12px; padding: 0 3px; }
+  /* 断点续跑横幅 */
+  #ckptbar { display: none; align-items: center; justify-content: space-between; gap: 10px;
+             background: var(--warnsoft); border: 1px solid #f59e0b55; color: var(--text);
+             padding: 8px 12px; border-radius: 10px; font-size: 13px; margin: 10px 14px 0; }
+  #ckptbar button { border: 1px solid var(--accent); background: var(--panel); color: var(--accent);
+                    border-radius: 7px; padding: 4px 12px; cursor: pointer; font-size: 12px;
+                    margin-left: 6px; }
   .sess .sa button:hover { color: var(--accent); }
   .sess .sa button.del:hover { color: #dc2626; }
   #files { max-height: 26vh; overflow-y: auto; font-size: 12px;
@@ -205,6 +212,7 @@
     <div id="meta"></div>
   </div>
   <div id="main">
+    <div id="ckptbar" style="display:none"></div>
     <div id="chat"></div>
     <div id="approvals"></div>
     <div id="composer">
@@ -675,6 +683,7 @@ async function openSession(name) {
   $("chat").innerHTML = "";
   liveText = "";
   hideAllApprovals();
+  checkInterrupted();
   const r = await (await fetch(`/api/sessions/${encodeURIComponent(name)}/history`)).json();
   r.items.forEach(handle);
   setRunning(r.running, r.usage);
@@ -757,6 +766,38 @@ $("msg").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
 $("newbtn").onclick = newSession;
+
+/* ---------- 断点续跑 ---------- */
+async function checkInterrupted() {
+  const bar = $("ckptbar");
+  try {
+    const j = await (await fetch("/api/interrupted")).json();
+    const it = (j.items || []).find((c) => c.session === cur);
+    if (!it) { bar.style.display = "none"; return; }
+    const task = esc(String(it.task || "").slice(0, 80));
+    bar.innerHTML = `<span>⚠️ 检测到中断任务 (${esc(it.ts || "")}, 第${esc(it.turn)}轮): ${task}</span>` +
+      `<span><button id="ckres">继续</button><button id="ckdis">放弃</button></span>`;
+    bar.style.display = "flex";
+    $("ckres").onclick = resumeTask;
+    $("ckdis").onclick = discardTask;
+  } catch (e) { bar.style.display = "none"; }
+}
+async function resumeTask() {
+  const r = await fetch("/api/resume", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session: cur})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { notice("❌ 续跑失败: " + (j.error || r.status)); return; }
+  $("ckptbar").style.display = "none";
+  notice("▶️ 已续跑中断任务, 进度见会话流");
+}
+async function discardTask() {
+  await fetch("/api/resume/discard", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({session: cur})});
+  $("ckptbar").style.display = "none";
+  notice("已放弃中断任务(会话历史保留)");
+}
 
 newSession();
 </script>

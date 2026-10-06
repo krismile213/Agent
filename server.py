@@ -510,6 +510,56 @@ async def chat(body: ChatBody, request: Request):
     return {"ok": True}
 
 
+# ---------- 断点续跑: 进程崩溃残留的 checkpoint → 一键继续/放弃 ----------
+
+def _resume_text(ckpt: dict) -> str:
+    return (f"[续跑] 此前有一个任务在执行中被中断:「{ckpt.get('task', '')}」"
+            f"(中断于第 {ckpt.get('turn', 0)} 轮附近, 时间 {ckpt.get('ts', '?')})。"
+            f"已完成的部分见会话历史, 请先核对进度再继续完成该任务, 给出最终结果。")
+
+
+@app.get("/api/interrupted")
+async def interrupted(request: Request):
+    """当前用户视角的中断残留(正在运行的会话不算)."""
+    user = getattr(request.state, "user", None)
+    running = {s.name for s in SESS.values() if s.running}
+    items = []
+    for c in core.list_checkpoints():
+        sid = c.get("session", "")
+        if sid in running:
+            continue
+        if AUTH["on"]:
+            if not sid.startswith(f"{user}{SEP}"):
+                continue
+            c = dict(c, session=sid.split(SEP, 1)[1])
+        items.append(c)
+    return {"items": items}
+
+
+class SessionOnlyBody(BaseModel):
+    session: str
+
+
+@app.post("/api/resume")
+async def resume(body: SessionOnlyBody, request: Request):
+    """续跑中断任务: 取该会话 ckpt, 合成续跑指令, 复用 /api/chat 全链路
+    (并发闸门/运行中检查/事件流全部一致). ckpt 由新一次 run_task 生命周期接管."""
+    scoped = _scope(request, body.session)
+    ckpt = next((c for c in core.list_checkpoints()
+                 if c.get("session") == scoped), None)
+    if ckpt is None:
+        return JSONResponse({"error": "该会话没有可续跑的中断任务"}, 404)
+    return await chat(ChatBody(session=body.session,
+                               message=_resume_text(ckpt)), request)
+
+
+@app.post("/api/resume/discard")
+async def resume_discard(body: SessionOnlyBody, request: Request):
+    """放弃中断任务: 清掉 ckpt, 会话历史保留(还能照常提问)."""
+    core.clear_checkpoint(_scope(request, body.session))
+    return {"ok": True}
+
+
 @app.post("/api/stop")
 async def stop(body: StopBody, request: Request):
     """停止正在运行的任务: 引擎在轮/工具边界优雅退出;

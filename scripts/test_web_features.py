@@ -6,6 +6,7 @@ scripts/test_web_features.py — P0 前端升级新增后端能力的离线测�
 覆盖: /api/files/raw 内联预览(200/敏感403/穿越400/404) + 会话重命名 + 会话删除(含遥测清理)。
 用 requests + uvicorn 守护线程起真实服务(免 httpx/TestClient 依赖), 端口 8811。
 """
+import json
 import os
 import sys
 import threading
@@ -115,6 +116,29 @@ def main() -> int:
     requests.delete(BASE + "/api/sessions/" + cleaned.replace(".", ""), timeout=5)
     for p in sd.glob("__t_*"):
         p.unlink(missing_ok=True)
+
+    # --- 断点续跑端点 ---
+    ck = sd / "__t_ckpt.ckpt.json"
+    ck.write_text(json.dumps({"session": "__t_ckpt", "task": "测试中断任务",
+                              "turn": 2, "ts": "2026-10-06T09:00:00"},
+                             ensure_ascii=False), encoding="utf-8")
+    r = requests.get(BASE + "/api/interrupted", timeout=5)
+    items = r.json().get("items", [])
+    check("interrupted 列出伪造 ckpt",
+          any(i.get("session") == "__t_ckpt" for i in items))
+    r = requests.post(BASE + "/api/resume", json={"session": "no_such"}, timeout=5)
+    check("resume 无 ckpt 404", r.status_code == 404)
+    r = requests.post(BASE + "/api/resume/discard",
+                      json={"session": "__t_ckpt"}, timeout=5)
+    check("discard 200 且 ckpt 已删",
+          r.status_code == 200 and not ck.exists())
+    r = requests.get(BASE + "/api/interrupted", timeout=5)
+    check("discard 后 interrupted 不再列出",
+          all(i.get("session") != "__t_ckpt" for i in r.json().get("items", [])))
+    bad = sd / "__t_bad.ckpt.json"
+    bad.write_text("{broken", encoding="utf-8")
+    requests.get(BASE + "/api/interrupted", timeout=5)  # 触发自清理
+    check("interrupted 顺带清掉损坏 ckpt", not bad.exists())
 
     print("ALL PASS" if not fails else f"FAILED: {fails}")
     return 1 if fails else 0

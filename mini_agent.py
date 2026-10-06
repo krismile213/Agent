@@ -182,6 +182,13 @@ def main():
     policy = InteractivePolicy(yolo=args.yolo)
     print(f"[启动] model={cfg['model']} 沙箱={core.ROOT} 会话={name}")
     print(f"[工具] {'/'.join(registry.names())}")
+    _ck = core.list_checkpoints()
+    if _ck:
+        print(f"[提示] 检测到 {len(_ck)} 个未完成任务(中断残留):")
+        for _c in _ck[:5]:
+            print(f"  - {_c['session']} @ {_c['ts']} (第{_c.get('turn', 0)}轮): "
+                  f"{str(_c.get('task', ''))[:50]}")
+        print("  续跑请到 Web 端对应会话, 或在本会话里直接说'继续'。")
 
     def confirm_plan(plan: str) -> bool:
         if args.yolo:
