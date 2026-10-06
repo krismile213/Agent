@@ -33,7 +33,9 @@ python server.py --no-plugins --no-open
 python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
 ```
 
-网页功能：多轮对话、工具调用/结果实时流式展示（SSE）、**写操作审批收件箱**（diff 预览 + 允许/本会话总允许/拒绝）、**文件面板**（导入文件到沙箱 `uploads/`、目录浏览、点击下载 AI 生成的文件；敏感文件拒下载）、会话侧栏（历史会话恢复）、反思/计划/分步执行开关、任务停止与转向、token 用量统计。导入的文件用相对路径在消息里引用即可（如"分析 uploads/xx.xlsx"——文本文件直接读，xlsx 走 run_python/pandas）。
+网页功能：多轮对话、工具调用/结果实时流式展示（SSE）、**写操作审批收件箱**（diff 预览 + 允许/本会话总允许/拒绝）、**文件面板**（导入文件到沙箱 `uploads/`、目录浏览、点击下载 AI 生成的文件；敏感文件拒下载）、会话侧栏（历史会话恢复）、反思/计划/分步执行开关、任务停止与转向、token 用量统计。导入的文件用相对路径在消息里引用即可（如"分析 uploads/xx.xlsx"——文本文件直接读，xlsx 走 run_python/pandas）。**登录鉴权+多用户**：config.json 配 `auth.users` 即启用——登录页、未登录 401/跳转、侧栏退出按钮，各用户会话按 `用户@会话` 命名空间互相隔离（沙箱文件仍共享）；不配置则维持本机免登录模式。
+
+**呈现层升级（2026-09-30）**：助手消息 **Markdown 渲染**（零依赖手写渲染器：标题/列表/表格/引用/围栏代码块，全程转义防 XSS，断言测试 `scripts/test_web_md.js`）；**工具调用折叠卡片**（状态点 运行中/成功/失败，失败自动展开）；**产物卡片 + 预览抽屉**（`write_file` 生成的文件自动出卡片，HTML/图片/CSV/Markdown/文本点开即右侧抽屉内联预览，走 `/api/files/raw`，同样的敏感/穿越拦截）；会话**重命名/删除**（`/api/sessions/{name}/rename`、`DELETE /api/sessions/{name}`，运行中拒绝）；**深浅主题**切换（localStorage 记忆）。
 
 架构：**一个引擎，多个前端** —— `agentcore.py`（事件回调驱动，前端无关）← CLI 适配器 `mini_agent.py`（input 确认） / Web 适配器 `server.py`（引擎跑工作线程，事件经 `call_soon_threadsafe` 推给 SSE；审批时引擎线程阻塞在 `threading.Event` 上等浏览器 POST `/api/approve`）。以后加钉钉机器人就是第三个适配器。
 
@@ -51,7 +53,7 @@ python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
 | **反思** | `reflect()`（CLI `--reflect` / Web 勾选） | self-check / critique |
 | **用量统计** | `LLMClient.usage` | cost awareness |
 | **跨会话记忆** | `MEMORY.md` + `save_memory` 工具 | 长期记忆（LLM 可沉淀要点，每次启动注入） |
-| **子agent扇出** | `run_subagent()` + `research` 工具 | Claude Code 的 Explore：并行调查、只读隔离、独立上下文互不污染（线程并行，硬上限 4 任务×15 轮）；**专属角色**（`role` 注入子agent系统提示）+ **工具白名单**（`tools`）；**verify 核查员**逐条验证结论依据 |
+| **子agent扇出** | `run_subagent()` + `research` 工具 | Claude Code 的 Explore：并行调查、只读隔离、独立上下文互不污染（线程并行，硬上限 4 任务×15 轮）；**专属角色**（`role` 注入子agent系统提示）+ **工具白名单**（`tools`）；**verify 核查员**逐条验证结论依据，配三道防幻觉防线：核查段独立预算不被截断、来源标记机器可查（无来源的数字要点标 `[无依据]`）、存疑/证伪条目自动隔离到文末 |
 | **计划模式** | `plan_and_run()`（CLI `--plan` / Web 勾选"先出计划"） | plan-then-execute：先出计划 → 审批收件箱批准 → 严格按计划执行；**分步执行**（CLI `--stepwise` / Web 勾选"分步执行"）：每步之间暂停，可继续/停止/**带修改指令原地转向**（审批框文本随批准下发） |
 | **流式输出** | `LLMClient.chat_stream`（SSE 逐 token，`assistant_delta` 事件） | 打字机体验；CLI 逐字打印，Web 实时气泡 |
 | **写安全网** | `write_file` 自动备份到 `.trash/` + `undo_write` 工具 | 覆盖前留底，一键撤销最近一次覆盖 |
@@ -106,11 +108,11 @@ python scripts/run_all.py --tier full        # 全量: +MCP双向+Web冒烟+各E
 python scripts/run_all.py --tier full --skip mcp,eval   # 按需跳过
 ```
 
-三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_rag / test_files / test_safety / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，15 用例，含 research 扇出、plan 模式与 RAG 混合检索）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，约 70 条）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
+三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_rag / test_files / test_safety / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，23 用例 = 机制回归 16 + 能力套件 ability 7——对账找差/防幻觉/严格JSON/跨源冲突裁决/裸算力/多文件统计/精确格式，全部断言式判定带标准答案）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，约 70 条）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
 
 ## MCP 双向接入（工具生态）
 
-**方向一：把自己的工具暴露成 MCP server**（`mcp_server.py`，手写 stdio JSON-RPC 协议子集，零新依赖）——ZCode / Claude Code 等任何 MCP 客户端可直接调用全部 12 个工具（含 workmain 插件）。接入示例（客户端侧 mcp 配置）：
+**方向一：把自己的工具暴露成 MCP server**（`mcp_server.py`，手写 stdio JSON-RPC 协议子集，零新依赖）——ZCode / Claude Code 等任何 MCP 客户端可直接调用全部 20 个工具（内置 9 含 external 级 dingtalk_send + RAG 3 + workmain 8）。接入示例（客户端侧 mcp 配置）：
 
 ```json
 {"mini-agent": {"command": "python", "args": ["C:\\Users\\dell\\Agent\\mcp_server.py"]}}
@@ -145,6 +147,8 @@ Set-ScheduledTask -TaskName AgentDailyBrief -Trigger (New-ScheduledTaskTrigger -
 
 ## Docker 部署
 
+> 部署到全新服务器（裸机/云主机，含 cron 定时简报与钉钉推送）的完整操作手册见 **[docs/DEPLOY.md](docs/DEPLOY.md)**——前置条件、config 逐字段核对、数据目录最小集、端到端验证清单与踩坑表。
+
 ```powershell
 cd C:\Users\dell\Desktop\Agent
 docker compose up -d --build      # 构建+启动(国内源已内置) → http://127.0.0.1:8765
@@ -165,8 +169,8 @@ push/PR 到 master 自动跑：**快速层测试**（离线，跳过依赖本地
 
 1. ~~**前端**：FastAPI + SSE 流式 Web UI（会话/审批收件箱/进度可视化）~~ ✅ 已交付（server.py + static/index.html，冒烟测试含审批闭环全通过）
 2. ~~**多轮对话增强**：跨会话记忆、任务级 checkpoint、中断后转向（steering）、SSE 断线补发~~ ✅ 已交付（MEMORY.md + save_memory / 悬空 tool_calls 自动修复 / cancel 检查点 + Web 停止按钮 / 事件 seq + Last-Event-ID 重放；测试 `scripts/test_upgrade.py` 全通过）。更深层"断点自动续跑"留在后续
-3. **人工干预增强**：~~任务停止/转向~~ ✅；~~计划审批~~ ✅ 已随计划模式交付；待做：批量审批、外发双确认、任务中途追加指令
-4. **reflection 例行化**：~~反思结论落库~~ ✅ 已升级为闭环（`reflect_and_fix`：反思发现具体问题 → 带工具自动修正一轮，有界不递归）；~~金标准评测集回归~~ ✅ 已交付（`eval/run_eval.py` + 12 用例，全绿）；待做：评测集扩容、失败模式统计
+3. **人工干预增强**：~~任务停止/转向~~ ✅；~~计划审批~~ ✅ 已随计划模式交付；~~批量审批~~ ✅（Web 审批卡片可堆叠 + 一键全部允许/拒绝，`/api/approve_batch`；刷新后经 `/api/pending` 重建未决卡片）；~~外发双确认~~ ✅（新增 `external` 工具级——草稿确认→发送确认两段审批、不吃"本会话总允许"，配套 `dingtalk_send` 工具（dry_run 可验配置），无人值守注册表自动摘除 external 级）；~~任务中途追加指令~~ ✅（任务运行中直接输入即追加：`InstructionInbox` 在轮/工具边界注入历史，`/api/enqueue`，不打断执行）
+4. **reflection 例行化**：~~反思结论落库~~ ✅ 已升级为闭环（`reflect_and_fix`：反思发现具体问题 → 带工具自动修正一轮，有界不递归）；~~金标准评测集回归~~ ✅ 已交付（`eval/run_eval.py`，机制回归 16 用例 + 能力套件 7 用例）；待做：失败模式统计
 5. **工具生态**：~~插件 API → MCP 化（同一函数两种暴露）~~ ✅ 已交付（`mcp_server.py` 手写协议双向暴露 + `mcp_bridge.py` 接入外部 server，测试 9/9）；"工具市场"待做
 7. **多agent协作**：~~子agent扇出~~ ✅ + ~~计划模式~~ ✅ + ~~专属角色子agent(角色/工具白名单)~~ ✅ + ~~结果自动核查(verify核查员)~~ ✅ + ~~计划分步执行与中途转向~~ ✅；待做：Web 端步骤级文本修改指令、子agent间协作(结果互引)
 6. **治理**：用量/成本预算、审计报表、多用户 RBAC；钉钉**入站机器人**（第三前端，Stream 模式收消息）待企业应用开通消息权限后接入——出站推送与定时晨检已交付（见上节）

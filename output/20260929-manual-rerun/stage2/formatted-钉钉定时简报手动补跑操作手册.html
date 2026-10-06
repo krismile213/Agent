@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="docx-page-size" content="A4">
+  <title>钉钉定时简报手动补跑操作手册</title>
+  <style>
+  /* ===== Design Tokens (modern-minimal, injected) + aliases ===== */
+  :root {
+    --typography-fontFamily-heading: PingFang SC, 苹方-简, 微软雅黑, sans-serif;
+    --typography-fontFamily-body: PingFang SC, 苹方-简, 微软雅黑, sans-serif;
+    --typography-fontFamily-code: JetBrains Mono, Fira Code, Consolas, monospace;
+    --typography-fontSize-title: 24pt;
+    --typography-fontSize-h1: 18pt;
+    --typography-fontSize-h2: 15pt;
+    --typography-fontSize-h3: 13pt;
+    --typography-fontSize-body: 11pt;
+    --typography-fontSize-small: 9pt;
+    --typography-lineHeight-title: 1.4;
+    --typography-lineHeight-body: 1.7;
+    --typography-lineHeight-heading: 1.3;
+    --typography-fontWeight-heading: 600;
+    --typography-fontWeight-body: 400;
+    --color-primary: #2563EB;
+    --color-text: #111827;
+    --color-textSecondary: #6B7280;
+    --color-heading: #111827;
+    --color-border: #E5E7EB;
+    --color-divider: #F3F4F6;
+    --color-background: #FFFFFF;
+    --color-codeBackground: #F9FAFB;
+    --color-highlight: #FEF3C7;
+    --spacing-paragraph: 0.5em;
+    --spacing-paragraphAfter: 0.5em;
+    --spacing-indent: 0em;
+    --spacing-sectionGap: 2em;
+    --spacing-listItemGap: 0.4em;
+    --layout-marginTop: 2.5cm;
+    --layout-marginBottom: 2.0cm;
+    --layout-marginLeft: 2.5cm;
+    --layout-marginRight: 2.5cm;
+    --layout-pageSize: A4;
+    --layout-maxContentWidth: 165mm;
+    /* aliases (long name -> short name) */
+    --page-content-width: var(--layout-maxContentWidth, 15.6cm);
+    --fs-title: var(--typography-fontSize-title, 24pt);
+    --fs-h2: var(--typography-fontSize-h2, 15pt);
+    --fs-h3: var(--typography-fontSize-h3, 13pt);
+    --fs-body: var(--typography-fontSize-body, 11pt);
+    --fs-small: var(--typography-fontSize-small, 9pt);
+    --ff-heading: var(--typography-fontFamily-heading, "微软雅黑", sans-serif);
+    --ff-body: var(--typography-fontFamily-body, "微软雅黑", sans-serif);
+    --ff-mono: var(--typography-fontFamily-code, Consolas, monospace);
+    --lh-body: var(--typography-lineHeight-body, 1.7);
+    --lh-heading: var(--typography-lineHeight-heading, 1.3);
+    --fw-heading: var(--typography-fontWeight-heading, 600);
+    --fw-body: var(--typography-fontWeight-body, 400);
+    --spacing-paragraph-gap: var(--spacing-paragraph, 0.5em);
+    --spacing-section: var(--spacing-sectionGap, 2em);
+    --spacing-block: var(--spacing-paragraphAfter, 0.5em);
+    --spacing-list-indent: var(--spacing-sectionGap, 2em);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--ff-body);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+    color: var(--color-text);
+    background: var(--color-background);
+    max-width: var(--page-content-width);
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  h2, h3 {
+    font-family: var(--ff-heading);
+    line-height: var(--lh-heading);
+    font-weight: var(--fw-heading);
+    color: var(--color-heading);
+    margin-top: var(--spacing-section);
+    margin-bottom: var(--spacing-paragraph-gap);
+  }
+  h2 { font-size: var(--fs-h2); border-bottom: 1px solid var(--color-border); padding-bottom: var(--spacing-block); }
+  h3 { font-size: var(--fs-h3); }
+
+  p { margin-bottom: var(--spacing-paragraph-gap); color: var(--color-text); font-size: var(--fs-body); }
+
+  ul, ol { padding-left: var(--spacing-list-indent); margin-bottom: var(--spacing-paragraph-gap); }
+  li { margin-bottom: var(--spacing-block); color: var(--color-text); font-size: var(--fs-body); }
+
+  table { border-collapse: collapse; width: 100%; margin-bottom: var(--spacing-block); }
+  th, td { padding: var(--spacing-block) var(--spacing-paragraph-gap); border: 1px solid var(--color-border); font-size: var(--fs-body); color: var(--color-text); text-align: left; }
+  th { font-weight: var(--fw-heading); background: var(--color-highlight); }
+
+  pre {
+    font-family: var(--ff-mono);
+    font-size: var(--fs-small);
+    background: var(--color-codeBackground);
+    border: 1px solid var(--color-border);
+    padding: var(--spacing-block);
+    margin-bottom: var(--spacing-paragraph-gap);
+    white-space: pre-wrap;
+    color: var(--color-text);
+  }
+  code { font-family: var(--ff-mono); font-size: var(--fs-small); background: var(--color-codeBackground); }
+
+  /* ===== TOC ===== */
+  .doc-toc { margin-bottom: var(--spacing-section); padding: var(--spacing-block); background: var(--color-codeBackground); border: 1px solid var(--color-border); }
+  .toc-title { font-weight: var(--fw-heading); margin-bottom: var(--spacing-block); color: var(--color-heading); }
+  .toc-list, .toc-list ol, .toc-list ul { list-style: none; list-style-type: none; padding-left: 0; }
+  .toc-list li { margin-bottom: var(--spacing-block); }
+  .toc-list a { color: var(--color-primary); text-decoration: none; }
+
+  /* ===== Cover ===== */
+  .cover-eyebrow { text-align: center; font-size: var(--fs-small); color: var(--color-textSecondary); margin-top: var(--spacing-section); }
+  section[role="cover"] h1 { text-align: center; font-family: var(--ff-heading); font-size: var(--fs-title); color: var(--color-heading); line-height: var(--lh-heading); margin-top: var(--spacing-section); margin-bottom: var(--spacing-section); }
+  .cover-subtitle { text-align: center; font-size: var(--fs-body); color: var(--color-textSecondary); margin-bottom: var(--spacing-block); }
+  .cover-meta { text-align: center; font-size: var(--fs-small); color: var(--color-textSecondary); margin-bottom: var(--spacing-block); }
+
+  /* ===== Emphasis (border-left paragraph, converter-safe) ===== */
+  .note-warn {
+    border-left: 3px solid var(--color-primary);
+    background: var(--color-codeBackground);
+    padding: var(--spacing-block);
+    margin-bottom: var(--spacing-paragraph-gap);
+    color: var(--color-text);
+    font-size: var(--fs-body);
+  }
+
+  .doc-footer { margin-top: var(--spacing-section); color: var(--color-textSecondary); font-size: var(--fs-small); }
+
+  @page { @bottom-center { content: counter(page); } }
+  @page cover { @bottom-center { content: none; } }
+  section[role="cover"] { page: cover; }
+  </style>
+</head>
+<body>
+  <section role="cover">
+    <p class="cover-eyebrow">内部运维文档</p>
+    <h1>钉钉定时简报手动补跑操作手册</h1>
+    <p class="cover-subtitle">适用链路：数据同步 → 简报生成 → 钉钉群推送（手机膜业务线）</p>
+    <p class="cover-meta">文档版本：v1.0　·　更新日期：2026-09-29　·　适用环境：Windows 10/11</p>
+  </section>
+  <section role="body" data-page-restart="1">
+    <nav class="doc-toc" aria-label="文档目录">
+      <p class="toc-title">目录</p>
+      <ol class="toc-list">
+        <li><a href="#section-1">一、完整补跑流程（共 4 步，约 10 分钟）</a></li>
+        <li><a href="#section-2">二、只重跑简报（数据没变，只是想重推一次）</a></li>
+        <li><a href="#section-3">三、常见问题与注意事项</a></li>
+        <li><a href="#section-4">四、一键命令速查</a></li>
+        <li><a href="#section-5">五、现有定时任务一览</a></li>
+      </ol>
+    </nav>
+    <div class="doc-main">
+      <p><strong>适用场景</strong>：定时任务每天自动运行（数据同步 09:00 / 14:30，简报推送 09:30 / 14:45）。如果表单在定时同步<strong>之后</strong>才有更新——比如 14:40 才更新，错过了 14:30 那轮同步——群里的简报就缺这部分数据。按本手册手动补跑一次，即可让群里收到包含最新数据的简报。</p>
+      <p class="note-warn">&nbsp;&nbsp;<strong>核心原则只有一条：先同步，后简报，顺序不能反。</strong>简报的数字全部来自同步落地的数据文件，不同步就直接跑简报，推出去的还是旧数据。</p>
+
+      <h2 id="section-1">一、完整补跑流程（共 4 步，约 10 分钟）</h2>
+      <p>按顺序执行以下 4 步即可完成补跑。全程约 10 分钟，其中等待同步占大头（7~8 分钟），这段时间可以去做别的事。</p>
+
+      <h3>第 1 步：手动触发数据同步</h3>
+      <p>在 <strong>PowerShell</strong> 窗口中执行：</p>
+      <pre>Start-ScheduledTask -TaskName DingTalkApprovalSync</pre>
+      <p>也可以用图形界面：按 <code>Win + R</code> 输入 <code>taskschd.msc</code> 回车，在"任务计划程序库"中找到 <code>DingTalkApprovalSync</code>，右键选择"运行"。</p>
+
+      <h3>第 2 步：等待同步真正完成（约 7~8 分钟）</h3>
+      <p class="note-warn">&nbsp;&nbsp;<strong>注意：任务状态很快显示"就绪"不等于完成</strong>——启动脚本会把实际工作转到后台，状态提前变回"就绪"。请按下面的方法判断真正完成。</p>
+      <table>
+        <thead>
+          <tr><th>判断方法</th><th>具体操作</th><th>完成标志</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>看同步日志</td><td>打开 <code>D:\Desktop\work-main\dingtalk\logs\</code> 下当天的 <code>sync_日期.log</code>，拉到最末尾</td><td>出现"体检完成"字样</td></tr>
+          <tr><td>看数据文件</td><td>打开 <code>D:\Desktop\work-main\data\手机膜\手机膜\</code> 文件夹</td><td>9 个 <code>Part*.xlsx</code> 文件的修改时间刷新为刚才的时间</td></tr>
+        </tbody>
+      </table>
+
+      <h3>第 3 步：跑简报并推送到钉钉群</h3>
+      <p>双击运行：</p>
+      <pre>C:\Users\dell\Desktop\Agent\run_brief.bat</pre>
+      <p>约 1~2 分钟跑完，窗口出现 <strong>"推送成功: 已发送"</strong> 即表示群里已收到。中午 12 点前生成的是晨检版 <code>briefs\日期.md</code>，12 点后是午后版 <code>briefs\日期_pm.md</code>。</p>
+
+      <h3>第 4 步：确认结果</h3>
+      <p>打开群里刚收到的简报，核对第一节的 <strong>"数据截至"</strong> 时间：应是最近几分钟内，说明补跑成功、数据是新的。</p>
+
+      <h2 id="section-2">二、只重跑简报（数据没变，只是想重推一次）</h2>
+      <p>如果确认数据没有新变化，只是想重新推送一条简报，直接执行<strong>第 3 步</strong>即可，不用同步。注意群里会收到内容相同的一条新消息。</p>
+
+      <h2 id="section-3">三、常见问题与注意事项</h2>
+      <table>
+        <thead>
+          <tr><th>现象</th><th>原因</th><th>处理办法</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>Start-ScheduledTask</code> 命令报错或找不到</td><td>在 cmd 或"运行"框里直接执行了该命令</td><td>改在 <strong>PowerShell</strong> 窗口执行（开始菜单搜 PowerShell）</td></tr>
+          <tr><td>同步等了很久文件还没刷新</td><td>同步正常需要 7~8 分钟；或确实失败了</td><td>到点再看一次；打开当日 <code>sync_日期.log</code> 末尾看有无报错，有则重做第 1 步</td></tr>
+          <tr><td>同步时 Excel/WPS 正开着某张 Part 表</td><td>被打开的旧文件删不掉，目录里残留新旧两份</td><td><strong>不会算错数</strong>——系统只认每个环节最新一份文件。关掉 Excel 后，下一轮同步会自动清掉残留</td></tr>
+          <tr><td>简报跑了一分多钟还没结束</td><td>免费模型偶尔限流（429），程序会自动重试或切换备用模型</td><td>多等 1~2 分钟即可，<strong>不要中途关窗口</strong></td></tr>
+          <tr><td>群里一天收到好几条简报</td><td>每次手动补跑都会新推一条</td><td>正常现象，以最新一条为准</td></tr>
+          <tr><td>简报里的日期或停滞天数明显不对</td><td>电脑时区不是北京时间</td><td>保持系统时区为 Asia/Shanghai（服务器部署详见 <code>docs/DEPLOY.md</code>）</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="section-4">四、一键命令速查</h2>
+      <pre># ① 触发同步（PowerShell 中执行）
+Start-ScheduledTask -TaskName DingTalkApprovalSync
+
+# ② 等 7~8 分钟，确认完成：
+#    日志 D:\Desktop\work-main\dingtalk\logs\sync_当天日期.log 末尾出现"体检完成"
+#    或 D:\Desktop\work-main\data\手机膜\手机膜\ 下 9 个 Part 文件时间已刷新
+
+# ③ 跑简报并推送（双击运行即可，也可用命令行）
+C:\Users\dell\Desktop\Agent\run_brief.bat</pre>
+
+      <h2 id="section-5">五、现有定时任务一览</h2>
+      <table>
+        <thead>
+          <tr><th>任务名（任务计划程序）</th><th>触发时间</th><th>作用</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>DingTalkApprovalSync</code></td><td>每天 09:00、14:30</td><td>从钉钉拉取审批数据，写入本地 Excel（9 个 Part 文件）</td></tr>
+          <tr><td><code>AgentDailyBrief</code></td><td>每天 09:30</td><td>生成晨检简报并推送钉钉群</td></tr>
+          <tr><td><code>AgentDailyBriefPM</code></td><td>每天 14:45</td><td>生成午后简报并推送钉钉群</td></tr>
+        </tbody>
+      </table>
+      <p>手动补跑的原理，就是按同样的顺序把"同步 → 简报"这套动作提前手动执行一遍，用到的任务和脚本与定时任务完全相同。</p>
+    </div>
+    <footer class="doc-footer">本手册基于 2026-09-29 实际链路验证整理；系统变动时请同步更新本文档。</footer>
+  </section>
+</body>
+</html>
