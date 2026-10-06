@@ -34,7 +34,8 @@ from agentcore import Tool, clip  # noqa: F401  (兼容旧插件 from mini_agent
 # ============================================================
 
 class InteractivePolicy:
-    """read级自动放行; write级逐次确认(可'a'本会话总允许); yolo全放行."""
+    """read级自动放行; write级逐次确认(可'a'本会话总允许); external级双重确认
+    (草稿确认+发送确认, 不支持'总允许'——对外发送不应有一次放行终身的口子); yolo全放行."""
 
     def __init__(self, yolo: bool = False):
         self.yolo = yolo
@@ -44,6 +45,20 @@ class InteractivePolicy:
         if self.yolo or tool.level == "read" or tool.name in self.always:
             return True
         print("  " + tool.preview(kwargs))
+        if tool.level == "external":
+            # 对外发送双确认: 第一眼草稿, 第二眼才真正出去
+            while True:
+                ans = input("  草稿内容无误? [y=内容OK / n=有误,拒绝]: ").strip().lower()
+                if ans in ("n", "no", ""):
+                    return False
+                if ans in ("y", "yes"):
+                    break
+            while True:
+                ans = input("  ⚠ 即将实际对外发送(不可撤回), 确认? [y=发送 / n=取消]: ").strip().lower()
+                if ans in ("y", "yes"):
+                    return True
+                if ans in ("n", "no", ""):
+                    return False
         while True:
             ans = input("  允许执行? [y=本次 / a=本会话总允许 / n=拒绝]: ").strip().lower()
             if ans in ("y", "yes"):
@@ -79,6 +94,8 @@ def cli_emit(kind: str, data: dict):
         print(f"  <- {first}")
     elif kind == "permission_denied":
         print(f"  [拒绝] {data['name']}")
+    elif kind == "instruction_injected":
+        print(f"  [追加] 用户指令已注入当前任务: {clip(data['text'], 120)}")
     elif kind == "injection_suspected":
         print(f"  [安全] 疑似提示注入已隔离(来源:{data['name']}, 标记:{data['marker']})")
     elif kind == "compact":

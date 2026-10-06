@@ -115,6 +115,20 @@ class LLMClient:
         self.usage = {"calls": 0, "prompt_tokens": 0,
                       "completion_tokens": 0, "total_tokens": 0}
 
+    def _model_chain(self) -> list[str]:
+        """主模型 + 可选降级链(cfg.model_fallbacks)。
+
+        免费档单模型很容易被限流(429 code 1302/1305), 而不同模型的限流桶是独立的
+        —— 重试时换到下一个模型, 比在同一个桶上死等更有效。未配置时退化为单模型,
+        行为与从前完全一致。
+        """
+        chain = [self.cfg["model"]]
+        for m in (self.cfg.get("model_fallbacks") or []):
+            m = str(m).strip()
+            if m and m not in chain:
+                chain.append(m)
+        return chain
+
     def _acc(self, u):
         if not isinstance(u, dict):
             return
@@ -133,7 +147,8 @@ class LLMClient:
         import storage
         br, rl = storage.guard(self.cfg)
         rl.acquire()
-        payload = {"model": self.cfg["model"], "messages": messages,
+        models = self._model_chain()
+        payload = {"model": models[0], "messages": messages,
                    "temperature": self.cfg["temperature"]}
         if tools:
             payload["tools"] = tools
@@ -142,6 +157,7 @@ class LLMClient:
         t0 = time.time()
         for attempt in range(1, 4):
             br.check()
+            payload["model"] = models[min(attempt - 1, len(models) - 1)]
             try:
                 r = self.session.post(self.endpoint, json=payload, headers=headers,
                                       timeout=self.cfg["request_timeout"])
@@ -152,13 +168,13 @@ class LLMClient:
                 data = r.json()
                 self._acc(data.get("usage"))
                 br.record(True)
-                storage.llm_call(self.cfg["model"],
+                storage.llm_call(payload["model"],
                                  int((time.time() - t0) * 1000), "ok",
                                  attempt - 1, data.get("usage"), stream=False)
                 return data["choices"][0]["message"]
             except _FatalError as fe:
                 br.record(False)
-                storage.llm_call(self.cfg["model"],
+                storage.llm_call(payload["model"],
                                  int((time.time() - t0) * 1000), "fatal",
                                  attempt - 1, None, stream=False)
                 raise
@@ -169,7 +185,7 @@ class LLMClient:
                     wait = 2 ** attempt
                     log(f"  [重试] 第{attempt}次调用失败({e}), {wait}s后重试")
                     time.sleep(wait)
-        storage.llm_call(self.cfg["model"], int((time.time() - t0) * 1000),
+        storage.llm_call(payload["model"], int((time.time() - t0) * 1000),
                          "error", 3, None, stream=False)
         raise RuntimeError(f"LLM调用失败(已重试3次): {last_err}")
 
@@ -180,7 +196,8 @@ class LLMClient:
         import storage
         br, rl = storage.guard(self.cfg)
         rl.acquire()
-        payload = {"model": self.cfg["model"], "messages": messages,
+        models = self._model_chain()
+        payload = {"model": models[0], "messages": messages,
                    "temperature": self.cfg["temperature"], "stream": True}
         if tools:
             payload["tools"] = tools
@@ -189,6 +206,7 @@ class LLMClient:
         t0 = time.time()
         for attempt in range(1, 4):
             br.check()
+            payload["model"] = models[min(attempt - 1, len(models) - 1)]
             try:
                 r = self.session.post(self.endpoint, json=payload,
                                       headers=headers, stream=True,
@@ -246,13 +264,13 @@ class LLMClient:
                 else:  # 流未带usage则粗估(标记为估算口径)
                     self._acc(u_out)
                 br.record(True)
-                storage.llm_call(self.cfg["model"],
+                storage.llm_call(payload["model"],
                                  int((time.time() - t0) * 1000), "ok",
                                  attempt - 1, u_out, stream=True)
                 return msg
             except _FatalError:
                 br.record(False)
-                storage.llm_call(self.cfg["model"],
+                storage.llm_call(payload["model"],
                                  int((time.time() - t0) * 1000), "fatal",
                                  attempt - 1, None, stream=True)
                 raise
@@ -263,7 +281,7 @@ class LLMClient:
                     wait = 2 ** attempt
                     log(f"  [重试] 第{attempt}次流式调用失败({e}), {wait}s后重试")
                     time.sleep(wait)
-        storage.llm_call(self.cfg["model"], int((time.time() - t0) * 1000),
+        storage.llm_call(payload["model"], int((time.time() - t0) * 1000),
                          "error", 3, None, stream=True)
         raise RuntimeError(f"LLM流式调用失败(已重试3次): {last_err}")
 
@@ -501,6 +519,29 @@ def t_save_memory(content: str) -> str:
     return f"已记入跨会话记忆 MEMORY.md: {line}"
 
 
+# ---------- 对外发送: external 级(双确认), 复用 dingtalk_push 的群机器人通道 ----------
+
+def _preview_dingtalk(kwargs: dict) -> str:
+    """外发草稿预览: 双重确认的第一屏 —— 用户先看内容再决定."""
+    return ("[外发草稿] dingtalk_send → 钉钉群机器人(发出后不可撤回)\n"
+            f"标题: {kwargs.get('title', '')}\n"
+            f"正文({len(str(kwargs.get('text', '')))}字符):\n"
+            + clip(str(kwargs.get("text", "")), 800))
+
+
+def t_dingtalk_send(title: str, text: str, dry_run: bool = False) -> str:
+    """真实外发(权限策略已双重确认后才可能执行到这里). dry_run=True 只验配置."""
+    import dingtalk_push as dp
+    if dry_run:
+        pc = dp._load_push_config()
+        if not pc["webhook"]:
+            return "[dry] 未配置 dingtalk_webhook(config.json), 真发会失败"
+        return (f"[dry] 配置就绪(webhook已配置{', 加签' if pc['secret'] else ''}), "
+                f"未实际发送。标题={title!r}, 正文{len(text)}字符")
+    ok, msg = dp.send(title, text)
+    return f"[外发{'成功' if ok else '失败'}] {msg} (标题: {title})"
+
+
 # ============================================================
 # 工具注册表 + 权限策略 (Registry / PermissionPolicy)
 # ============================================================
@@ -511,7 +552,7 @@ class Tool:
         self.name = name
         self.description = desc
         self.parameters = params   # JSON Schema
-        self.level = level         # "read" 自动放行 / "write" 逐次确认
+        self.level = level         # "read" 自动放行 / "write" 逐次确认 / "external" 对外双确认
         self.func = func
         self.preview_fn = preview_fn  # 可选: 确认前的自定义预览(如diff)
 
@@ -527,6 +568,30 @@ class Tool:
             except Exception:
                 pass
         return f"[写操作] {self.name}({clip(json.dumps(kwargs, ensure_ascii=False), 600)})"
+
+
+class InstructionInbox:
+    """任务中途追加指令的线程安全收件箱: 适配器入队(add), 引擎在轮/工具
+    边界 drain() 注入历史 —— 模型下一轮即可看到, 不打断正在执行的工具."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._items: list[str] = []
+
+    def add(self, text: str):
+        t = str(text or "").strip()
+        if t:
+            with self._lock:
+                self._items.append(t)
+
+    def drain(self) -> list[str]:
+        with self._lock:
+            items, self._items = self._items, []
+        return items
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
 
 
 class Registry:
@@ -642,10 +707,22 @@ def build_registry() -> Registry:
             "content": {"type": "string", "description": "要记住的要点, 一句话"}},
          "required": ["content"]}, "write", t_save_memory))
     r.register(Tool(
+        "dingtalk_send",
+        "把markdown消息推送到钉钉群机器人(对外发送, 不可撤回; 需用户双重确认:"
+        "先确认草稿内容, 再确认实际发送). 建议先用 dry_run=true 验证配置再出草稿.",
+        {"type": "object", "properties": {
+            "title": {"type": "string", "description": "消息标题(同时用于群机器人的关键词匹配)"},
+            "text": {"type": "string", "description": "markdown正文(不含一级标题)"},
+            "dry_run": {"type": "boolean",
+                        "description": "true=只检查推送配置不实际发送, 默认false"}},
+         "required": ["title", "text"]}, "external", t_dingtalk_send,
+        preview_fn=_preview_dingtalk))
+    r.register(Tool(
         "research",
         "并行派出最多4个只读子agent分头调查(独立上下文互不污染), 返回各自结论. "
         "tasks 元素为字符串, 或 {task, role, tools} 对象 —— role指定专属角色(如'代码审计员'), "
-        "tools为只读工具白名单. verify=true 追加核查员逐条验证结论依据. "
+        "tools为只读工具白名单. verify=true 追加核查员逐条验证: 存疑/证伪条目会被隔离到"
+        "文末并显著标记; 未带来源标记的数字类事实会被标 [无依据]. "
         "适合: 多文件/多方向探索、互不依赖的并行查证. 需要写操作的任务留给你自己执行.",
         {"type": "object", "properties": {
             "tasks": {"type": "array", "items": {"anyOf": [
@@ -738,7 +815,10 @@ SUBAGENT_SYS = """你是子agent, 由主agent派出独立完成一项调查子�
 规则:
 1. 你只有只读工具, 只调查不修改; 需要写操作的任务留给主agent.
 2. 主agent只能看到你的最终结论(看不到你的过程), 结论必须自包含.
-3. 按结构输出: 结论(1~2句) / 关键事实(带工具或文件来源) / 如有: 建议.
+3. 按结构输出: 结论(1~2句) / 关键事实 / 如有: 建议.
+   关键事实逐条列出, 每条必须尾注来源, 格式: (来源: 文件路径:行号) 或
+   (来源: 工具名). 确实查不到来源的事实要写 (来源: 未找到) 并明说不确定性.
+   —— 汇总方会机器扫描来源标记, 缺标记的数字类事实会被标 [无依据].
 中文, 500字以内.
 
 工作沙箱: {root}
@@ -772,6 +852,76 @@ def run_subagent(client: LLMClient, registry: Registry, task: str, cfg: dict,
     tr.log("end", {"reason": "subagent", **client.usage})
     tr.close()
     return answer
+
+
+def _has_citation(text: str) -> bool:
+    return bool(re.search(r"(来源|依据|出处|source)\s*[:：]", text, re.I))
+
+
+_FACT_LINE_RE = re.compile(r"^(\s*(?:[-*•·]|\d{1,2}[.、)])[ \t]*)(.+)$")
+
+
+def _mark_unsourced(text: str) -> str:
+    """引用机器可查(防幻觉渗透): 块内完全无来源标记 -> 整块标 [无依据];
+    有标记但带数字的要点行缺来源 -> 行级标 [无依据](数字是最易被编造的断言)."""
+    lines = text.splitlines()
+    if not _has_citation(text):
+        return "⚠️[无依据-整块未带来源]\n" + text
+    out = []
+    for ln in lines:
+        m = _FACT_LINE_RE.match(ln)
+        # 标注插在列表符号之后, 保持列表结构可读
+        if m and re.search(r"\d", m.group(2)) and not _has_citation(ln):
+            out.append(f"{m.group(1)}[无依据] {m.group(2)}")
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+_VERDICT_RE = re.compile(
+    r"#\s*(\d{1,2})\s*[:：]\s*(通过|存疑|证伪)(?:[ \t]*[-—～~])?[ \t]*([^\n]*)")
+
+
+def _parse_verdicts(verdict_text: str) -> dict:
+    """核查员输出 -> {序号: (判定, 原因)}. 只认结构化行 '#i: 通过|存疑|证伪 — 原因'."""
+    out = {}
+    for m in _VERDICT_RE.finditer(verdict_text or ""):
+        idx = int(m.group(1))
+        out[idx] = (m.group(2), clip(m.group(3).strip(), 80))  # 同条目重复取最后一次
+    return out
+
+
+def _quarantine(parts: list, verdict_text: str) -> list:
+    """存疑即隔离: 被核查员标 存疑/证伪 的条目原地降级为占位一行,
+    原文移到末尾隔离区(带显著标记), 让主模型想误信都难. 未抽查的条目不动."""
+    vd = _parse_verdicts(verdict_text)
+    bad = {i: v for i, v in vd.items() if v[0] in ("存疑", "证伪")}
+    if not bad:
+        return parts
+    out, quarantined = [], []
+    for i, p in enumerate(parts, 1):
+        if i in bad:
+            nl = p.find("\n")
+            head = p[:nl] if nl >= 0 else p
+            verdict, reason = bad[i]
+            tag = "⚠️核查存疑" if verdict == "存疑" else "❌核查证伪"
+            out.append(f"{head}\n({tag}, 已隔离至文末"
+                       f"{('，原因: ' + reason) if reason else ''})")
+            quarantined.append(f"{tag} [子任务{i} 原文]\n{p}")
+        else:
+            out.append(p)
+    out.append("───── ⚠️ 隔离区(以下结论未通过核查, 采信前必须自行复核) ─────")
+    out.extend(quarantined)
+    return out
+
+
+def _assemble_research(parts: list, verify_block: str | None = None) -> str:
+    """汇总组装: [核查] 段单独预留预算, 不再被全局 clip 截掉(修复截断bug)."""
+    if verify_block:
+        vb = clip(verify_block, 3_000)
+        body_cap = max(6_000, 12_000 - len(vb))  # 核查存在时给正文留足且不超总预算
+        return clip("\n\n".join(parts), body_cap) + "\n\n" + vb
+    return clip("\n\n".join(parts), 10_000)
 
 
 def t_research(tasks, max_turns: int = 10, verify: bool = False) -> str:
@@ -826,21 +976,27 @@ def t_research(tasks, max_turns: int = 10, verify: bool = False) -> str:
         head = f"[子任务{i + 1}] {spec['task']}"
         if spec["role"]:
             head += f" (角色: {spec['role'][:30]})"
-        parts.append(head + "\n" + clip(body, 2200))
+        # 防幻觉: 来源机器可查, 缺标记的数字类事实会被行级/块级标 [无依据]
+        parts.append(head + "\n" + clip(_mark_unsourced(body), 2200))
+    verify_block = None
     if verify:
         pairs = "\n\n".join(f"[问题{i + 1}] {s['task']}\n[结论] {clip(r, 1200)}"
                             for i, (s, r) in enumerate(zip(norm, results)))
         vtask = ("以下是对若干调查问题的结论, 请逐条核查: 关键事实/数字是否有依据"
-                 "(用工具抽查原始来源), 各结论之间是否矛盾. "
-                 "输出: 每条给出 通过/存疑(原因), 最后一行给总结论。\n\n" + pairs)
+                 "(用工具抽查原始来源), 各结论之间是否矛盾.\n"
+                 "输出格式(必须严格遵守, 便于机器解析):\n"
+                 "对每一条单独输出一行: #序号: 通过|存疑|证伪 — 一句话原因\n"
+                 "全部条目输出完后, 最后再写总结论。\n\n" + pairs)
         try:
             vclient = LLMClient(sub_cfg)
             verdict = run_subagent(vclient, reg, vtask, sub_cfg, name="verify",
                                    role="核查员: 只信工具输出, 不放过无依据的数字")
-            parts.append(f"[核查]\n{clip(verdict, 2500)}")
+            # 存疑即隔离: 原地降级为占位, 原文移文末隔离区
+            parts = _quarantine(parts, verdict)
+            verify_block = f"[核查]\n{verdict}"
         except Exception as e:
-            parts.append(f"[核查] (核查员执行失败: {e})")
-    return clip("\n\n".join(parts), 10_000)
+            verify_block = f"[核查] (核查员执行失败: {e})"
+    return _assemble_research(parts, verify_block)
 
 
 # ============================================================
@@ -985,11 +1141,30 @@ def normalize(msg: dict) -> dict:
     return m
 
 
+def _drain_inbox(inject, history: list, transcript: Transcript, emit) -> None:
+    """工具间隙收件箱: 把用户任务中途追加的指令注入历史(下一轮模型可见).
+    注入发生在 user 边界, 不拆散 assistant/tool_calls 消息对."""
+    try:
+        items = inject.drain()
+    except Exception:
+        return
+    if not items:
+        return
+    text = "\n".join(items)
+    history.append({"role": "user",
+                    "content": "[中途追加指令]用户在任务执行中补充(融入当前任务, 不是新任务):\n" + text})
+    transcript.log("message", {"msg": history[-1]})
+    if emit:
+        emit("instruction_injected", {"text": clip(text, 200)})
+
+
 def run_task(client: LLMClient, registry: Registry, policy,
              transcript: Transcript, history: list, task: str, cfg: dict,
-             emit=None, cancel=None, emit_end: bool = True) -> str:
+             emit=None, cancel=None, emit_end: bool = True,
+             inject: InstructionInbox | None = None) -> str:
     """执行一个任务: 模型→工具→结果回灌→再决策, 直到产出最终回答(或达轮数上限).
     cancel: 可选 threading.Event, 置位后在轮/工具边界优雅停止(steering 的基础).
+    inject: 可选 InstructionInbox, 任务中途追加的指令在轮/工具边界注入历史.
     emit_end: 分步执行时中间步传False —— task_end 只代表"整个用户任务完成"."""
     emit = emit or (lambda kind, data: None)
     emit("task_start", {"task": task})
@@ -1013,6 +1188,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
                 emit("task_end", {"answer": answer, "usage": dict(client.usage)})
             storage.task_end("cancelled", answer, turns_used, client.usage)
             return answer
+        _drain_inbox(inject, history, transcript, emit)  # 轮首检查点
         maybe_compact(client, history, cfg["context_budget_tokens"], emit)
         try:
             stream_fn = (client.chat_stream
@@ -1060,7 +1236,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
                 elif tool is None:
                     result = f"[工具错误] 未注册的工具: {name}"
                 elif policy.allow(tool, kwargs):
-                    if tool.level == "write":
+                    if tool.level in ("write", "external"):
                         storage.approval(sess, "tool", name, "allowed")
                     _t0 = time.time()
                     result = clip(registry.execute(name, kwargs))
@@ -1070,7 +1246,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
                                       int((time.time() - _t0) * 1000))
                 else:
                     emit("permission_denied", {"name": name})
-                    if tool.level == "write":
+                    if tool.level in ("write", "external"):
                         storage.approval(sess, "tool", name, "denied")
                     result = "[用户拒绝] 本次调用被拒绝, 请换方案或询问用户."
             result = str(result)
@@ -1082,6 +1258,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
                             "content": wrap_tool_result(name, result, inj)})
             transcript.log("message", {"msg": history[-1]})
 
+        _drain_inbox(inject, history, transcript, emit)  # 工具间隙检查点
         if _cancelled():
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
@@ -1156,7 +1333,8 @@ def _reflect_passed(critique: str) -> bool:
 def reflect_and_fix(client: LLMClient, registry: Registry, policy,
                     transcript: Transcript, history: list, task_start: int,
                     answer: str, cfg: dict, emit=None, cancel=None,
-                    max_rounds: int = 1) -> str:
+                    max_rounds: int = 1,
+                    inject: InstructionInbox | None = None) -> str:
     """反思闭环: 反思发现具体问题时, 自动带着工具修正一轮(有界, 不递归反思)."""
     emit = emit or (lambda kind, data: None)
     critique = reflect(client, transcript, history, task_start, answer, emit=emit)
@@ -1170,7 +1348,7 @@ def reflect_and_fix(client: LLMClient, registry: Registry, policy,
         fix_msg = ("[反思修正]上一轮反思指出了具体问题, 请: 修正错误结论 / "
                    "用工具补做缺失的验证, 然后给出修订后的最终回答.")
         answer = run_task(client, registry, policy, transcript, history,
-                          fix_msg, cfg, emit=emit, cancel=cancel)
+                          fix_msg, cfg, emit=emit, cancel=cancel, inject=inject)
         if not answer or answer.startswith(("[", "(")):
             break
     return answer
@@ -1202,7 +1380,8 @@ def propose_plan(client: LLMClient, registry: Registry, task: str,
 def plan_and_run(client: LLMClient, registry: Registry, policy,
                  confirm, transcript: Transcript, history: list, task: str,
                  cfg: dict, emit=None, cancel=None, stepwise: bool = False,
-                 step_confirm=None) -> str:
+                 step_confirm=None,
+                 inject: InstructionInbox | None = None) -> str:
     """计划模式: 生成计划 → confirm(plan)人工批准 → 执行.
     confirm(plan_text)->bool 由适配器提供(CLI=input确认, Web=审批收件箱).
     stepwise=True 分步执行: 计划按编号拆步, 每步执行完发 step_done 事件并调
@@ -1211,7 +1390,7 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
     emit = emit or (lambda kind, data: None)
     if cancel is not None and cancel.is_set():
         return run_task(client, registry, policy, transcript, history,
-                        task, cfg, emit=emit, cancel=cancel)
+                        task, cfg, emit=emit, cancel=cancel, inject=inject)
     log("[plan] 生成计划中...")
     plan = propose_plan(client, registry, task, cfg)
     log(f"[plan] 计划已生成({len(plan)}字符)")
@@ -1220,7 +1399,7 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
     if not plan:
         emit("plan_rejected", {"plan": "(计划生成失败, 直接执行)"})
         return run_task(client, registry, policy, transcript, history,
-                        task, cfg, emit=emit, cancel=cancel)
+                        task, cfg, emit=emit, cancel=cancel, inject=inject)
     emit("plan", {"plan": plan})
     res = confirm(plan)
     if isinstance(res, tuple):          # (批准?, 附加要求文本)
@@ -1255,7 +1434,7 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
             ans = run_task(client, registry, policy, transcript, history,
                            f"[计划执行 {i}/{len(steps)}] 原任务: {task[:200]}\n"
                            f"本步只做: {st}\n(完成本步即停, 后续步骤由用户决定是否继续)",
-                           cfg, emit=emit, cancel=cancel,
+                           cfg, emit=emit, cancel=cancel, inject=inject,
                            emit_end=(i == len(steps)))  # 中间步不发task_end
             final = ans
             emit("step_done", {"step": i, "total": len(steps), "text": st})
@@ -1276,7 +1455,7 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
 
     task2 = task + "\n\n[已批准的执行计划, 请严格按计划执行]\n" + plan
     return run_task(client, registry, policy, transcript, history,
-                    task2, cfg, emit=emit, cancel=cancel)
+                    task2, cfg, emit=emit, cancel=cancel, inject=inject)
 
 
 def _split_plan_steps(plan: str) -> list:

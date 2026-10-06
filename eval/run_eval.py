@@ -18,6 +18,7 @@ eval/run_eval.py — 金标准评测 runner
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -32,6 +33,8 @@ EVAL_DIR = Path(__file__).resolve().parent
 GOLDEN = EVAL_DIR / "golden.jsonl"
 FIXTURES = EVAL_DIR / "fixtures"
 REPORTS = EVAL_DIR / "reports"
+# 沙箱根目录: case 的 cwd 字段 → 实际目录(ability = 能力套件专用夹具)
+ROOTS = {"here": HERE, "fixtures": FIXTURES, "ability": FIXTURES / "ability"}
 
 
 def load_cases() -> list:
@@ -45,8 +48,11 @@ def load_cases() -> list:
 
 
 def run_case(case: dict, cfg: dict, registry, policy) -> dict:
-    root = HERE if case.get("cwd", "here") == "here" else FIXTURES
+    root = ROOTS.get(case.get("cwd", "here"), HERE)
     core.set_root(root)
+    # 清理上次运行留下的产物, 防止旧文件冒充本次交付物骗过 files 断言
+    for f in case.get("checks", {}).get("files", []):
+        (Path(root) / f["path"]).unlink(missing_ok=True)
     tr = core.Transcript(f"eval_{case['id']}")
     tr.clear()  # 每次干净重跑
     history = [{"role": "system", "content": core.build_system_prompt()}]
@@ -71,7 +77,42 @@ def run_case(case: dict, cfg: dict, registry, policy) -> dict:
                                case["task"], cfg, emit=emit)
     tr.close()
     return {"answer": answer or "", "events": events,
-            "usage": dict(client.usage), "dur": round(time.time() - t0, 1)}
+            "usage": dict(client.usage), "dur": round(time.time() - t0, 1),
+            "root": str(root)}
+
+
+# ── answer_json 断言的辅助: 提取回答中的首个 JSON 对象 + 容错子集匹配 ──
+
+def _extract_json(text: str) -> object:
+    t = text.strip()
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", t, re.S)
+    if m:
+        t = m.group(1)
+    else:
+        i, j = t.find("{"), t.rfind("}")
+        if i == -1 or j <= i:
+            raise ValueError("回答中没有 JSON 对象")
+        t = t[i:j + 1]
+    return json.loads(t)
+
+
+def _json_subset(got, exp) -> bool:
+    """递归子集匹配; 字符串比较忽略空白; 数值容忍 int/float/字符串形式."""
+    if isinstance(exp, dict):
+        return (isinstance(got, dict)
+                and all(k in got and _json_subset(got[k], v)
+                        for k, v in exp.items()))
+    if isinstance(exp, bool):
+        return got is exp
+    if isinstance(exp, (int, float)):
+        if isinstance(got, (int, float)) and not isinstance(got, bool):
+            return got == exp
+        try:
+            return float(str(got).strip()) == float(exp)
+        except (ValueError, TypeError):
+            return False
+    norm = lambda v: re.sub(r"\s+", "", v) if isinstance(v, str) else v  # noqa: E731
+    return norm(got) == norm(exp)
 
 
 def evaluate(case: dict, res: dict) -> list:
@@ -102,6 +143,43 @@ def evaluate(case: dict, res: dict) -> list:
     for k in ch.get("events_contains", []):
         if not any(e.get("kind") == k for e in evs):
             fails.append(f"缺少事件 {k}")
+    for pat in ch.get("answer_regex", []):
+        if not re.search(pat, ans):
+            fails.append(f"回答不匹配正则 {pat!r}")
+    if ch.get("answer_regex_any") and not any(re.search(p, ans)
+                                              for p in ch["answer_regex_any"]):
+        fails.append(f"回答未匹配任一正则 {ch['answer_regex_any']}")
+    if ch.get("no_tools") and called:
+        fails.append(f"要求零工具但调用了 {called[:3]}")
+    root = res.get("root")
+    for f in ch.get("files", []):
+        p = Path(root) / f["path"] if root else Path(f["path"])
+        if not p.exists():
+            fails.append(f"未产出文件 {f['path']}")
+            continue
+        txt = p.read_text("utf-8", errors="replace")
+        lines = txt.splitlines()
+        for s in f.get("contains", []):
+            if s not in txt:
+                fails.append(f"{f['path']} 缺少 {s!r}")
+        for pat in f.get("contains_regex", []):
+            if not re.search(pat, txt):
+                fails.append(f"{f['path']} 不匹配正则 {pat!r}")
+        if "line_count" in f and len(lines) != f["line_count"]:
+            fails.append(f"{f['path']} 行数 {len(lines)} ≠ {f['line_count']}")
+        if "line_prefix" in f:
+            bad = [l for l in lines
+                   if l.strip() and not l.startswith(f["line_prefix"])]
+            if bad:
+                fails.append(f"{f['path']} 存在不以 {f['line_prefix']!r} "
+                             f"开头的行: {bad[:2]}")
+    if "answer_json" in ch:
+        try:
+            got = _extract_json(ans)
+            if not _json_subset(got, ch["answer_json"]):
+                fails.append(f"JSON 值与期望不符: {str(got)[:120]}")
+        except (ValueError, json.JSONDecodeError) as e:
+            fails.append(f"回答不是可解析 JSON ({e})")
     m = ch.get("max_llm_calls")
     if m and res["usage"]["calls"] > m:
         fails.append(f"LLM调用{res['usage']['calls']}次超上限{m}")
@@ -111,7 +189,8 @@ def evaluate(case: dict, res: dict) -> list:
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="mini_agent 金标准评测")
-    ap.add_argument("--suite", choices=["core", "workmain", "all"], default="all")
+    ap.add_argument("--suite", choices=["core", "workmain", "ability", "all"],
+                    default="all")
     ap.add_argument("--case", help="只跑指定 id 的用例")
     ap.add_argument("--model", help="临时覆盖模型名(对比用)")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个")
