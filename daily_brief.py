@@ -11,10 +11,10 @@ daily_brief.py — 无人值守的每日晨检简报(定时任务入口)
 配合已有体系: 数据同步本身由 work-main/dingtalk 的计划任务负责,
 本脚本只消费其日志与产物, 不重复同步。
 
-Windows 计划任务(已注册, 2026-09-28 核对: \AgentDailyBrief 每日 09:30,
-\AgentDailyBriefPM 每日 14:45, 动作都是 run_brief.bat; 排在上游同步任务
-\DingTalkApprovalSync 的 09:00 / 14:30 之后). 本机 schtasks.exe 被安全策略拦,
-注册/查询一律走 PowerShell:
+Windows 计划任务(已注册, 2026-09-28 核对: 任务 AgentDailyBrief 每日 09:30,
+AgentDailyBriefPM 每日 14:45, 动作都是 run_brief.bat; 排在上游同步任务
+DingTalkApprovalSync 的 09:00 / 14:30 之后). 本机 schtasks.exe 被安全策略拦,
+注册/查询一律走 PowerShell(模块名 ScheduledTasks):
   Get-ScheduledTask -TaskName AgentDailyBrief
   Set-ScheduledTask -TaskName AgentDailyBrief -Trigger (New-ScheduledTaskTrigger -Daily -At "09:30")
 """
@@ -44,15 +44,21 @@ def build_readonly_registry(cfg: dict) -> core.Registry:
 
 TASK_TEMPLATE = """今日晨检({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。请依次完成:
 1) 用 sync_status 查看钉钉同步定时任务的运行状态。
-2) 用 scan_sync_data 实时扫描: 状态分布 / 数据截至时间 / 今日有动态的SKU。
+2) 用 scan_sync_data 实时扫描: 状态分布 / 数据截至时间 / 今日有动态明细(含所在Part)。
 3) 用 pipeline_alerts 获取四层信号: 本周新增SKU / 全流程临期(空运60·海运69) /
    已超期 / 环节停滞超目标(近似段级)。
 4) 用 read_file 读取 流程复盘/output/预警_加急SKU.md 的前40行(不存在就跳过),
    仅作背景补充 —— 必须注明它是旧批次产物, 与实时数据冲突时以实时为准。
-输出中文markdown简报(250~450字), 分六节:
-① 同步状态与数据截至 ② 今日动态 ③ 本周新增SKU(编号+型号)
-④ 临期预警(按剩余天数升序, 带卡点与空运/海运口径) ⑤ 已超期与环节停滞TOP(带超标天数)
-⑥ 行动建议(≤2条)。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。"""
+输出中文markdown简报(280~480字), 分六节:
+① 同步状态与数据截至(若任一工具输出带 ⚠️ 数据过旧/同步停摆告警, 必须把
+   "数据已N天未同步, ⑤的停滞天数含断供期偏大" 写在简报最顶部第一行, 再写其他内容)
+② 今日动态 ③ 本周新增SKU(编号+型号)
+④ 临期预警(按剩余天数升序, 带卡点与空运/海运口径) ⑤ 已超期与环节停滞TOP(带超标天数,
+   并注明口径"段级停滞=距最后更新vs环节目标", 不要写成全流程耗时; scan_sync_data 与
+   pipeline_alerts 的停滞口径不同, 同一SKU数字可能差1天以上, 引用时注明来源工具)
+⑥ 行动建议(≤2条)。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。
+② 今日动态必须逐条写清"哪条SKU/型号 · 在哪个Part(环节) · 审批状态 · 最新审批节点+操作人+时间 ·
+当前负责人", 直接抄工具给的明细, 不要只写编号; 工具没给节点明细就注明"仅字段更新"。"""
 
 
 def main():

@@ -38,6 +38,77 @@ ROUTE_SCRIPTS = {
 _kb = None  # search_kb 懒加载单例
 
 
+def _s(v) -> str:
+    """pandas 单元格 → 干净字符串; nan/None 一律归一成空串(注意 float('nan') 是 truthy)."""
+    s = "" if v is None else str(v).strip()
+    return "" if s.lower() in ("nan", "nat", "none") else s
+
+
+def _latest_parts(d):
+    """每个环节(Part前缀, 即文件名最后一个'-'之前的部分)只保留 mtime 最新一份.
+
+    背景: 同步是覆盖式更新(写新文件+删旧文件), 但旧文件被 Excel/WPS 打开时
+    删除会失败, 目录里同环节新旧两份并存 → 行级统计双倍. 按前缀取最新可免疫.
+    """
+    best = {}
+    for p in sorted(d.glob("Part*.xlsx")):
+        if p.name.startswith("~$"):
+            continue
+        key = p.stem.rsplit("-", 1)[0] if "-" in p.stem else p.stem
+        mt = p.stat().st_mtime
+        if key not in best or mt >= best[key][0]:
+            best[key] = (mt, p)
+    return [p for _, p in sorted((v for v in best.values()), key=lambda t: t[1].name)]
+
+
+def _part_label(stem: str) -> str:
+    """'Part2_新品首单下单-20260928090829' → 'Part2 新品首单下单'."""
+    return stem.split("-")[0].replace("_", " ")
+
+
+def _stale_note(fresh_time, warn_days: int = 2) -> str:
+    """数据新鲜度硬判(纯函数, 可测): 数据截至距今 > warn_days 天时返回告警行.
+
+    背景: 停滞天数 = 今天 - 表内更新时间. 上游同步一旦断供, 全表更新时间
+    集体停在断供前, 停滞/超期天数会静默虚增断供天数 —— 这行告警防误读.
+    fresh_time: 各Part表内最大「更新时间」(pd.Timestamp 或 None).
+    """
+    if fresh_time is None:
+        return "⚠️ 数据新鲜度: 表内无有效更新时间, 停滞/预警数字不可信"
+    try:
+        now = datetime.now()
+        lag = (now - datetime(fresh_time.year, fresh_time.month,
+                              fresh_time.day)).days
+    except Exception:
+        return ""
+    if lag > int(warn_days):
+        return (f"⚠️ 数据已 {lag} 天未更新(截至 {str(fresh_time)[:16]}), "
+                f"以下停滞/超期天数含断供期会偏大, 请先确认同步任务是否正常再采信")
+    return ""
+
+
+def _latest_node(record, fallback_ts: str = "") -> str:
+    """从「审批记录」取最后一条节点, 输出 操作人「节点名」MM-DD HH:MM.
+
+    记录格式: 多条用 ';' 分隔, 每条内 '|' 分隔 = 操作人|节点|时间|类型(audit/抄送).
+    例: '李杰华|全套样品测试完成|2026-09-28 08:59:11|audit|'
+    """
+    s = _s(record)
+    if not s:
+        return f"无节点明细(最后更新 {fallback_ts})" if fallback_ts else "无节点明细"
+    items = [x.strip() for x in s.split(";") if x.strip()]
+    if not items:
+        return f"无节点明细(最后更新 {fallback_ts})" if fallback_ts else "无节点明细"
+    f = [x.strip() for x in items[-1].split("|")]
+    if len(f) >= 3 and f[1]:
+        ts = f[2][:16]
+        if len(ts) >= 16 and ts[4] == "-":        # 'YYYY-MM-DD HH:MM' → 去掉年份
+            ts = ts[5:]
+        who = f[0] or "?"
+        return f"{who}「{f[1]}」{ts}"
+    return items[-1][:50]
+
+
 def register(registry, cfg: dict) -> int:
     root = Path(cfg.get("workmain_root") or DEFAULT_ROOT)
 
@@ -55,8 +126,7 @@ def register(registry, cfg: dict) -> int:
             for sub in sorted(d.iterdir()):
                 if not sub.is_dir():
                     continue
-                parts = [p for p in sub.glob("Part*.xlsx")
-                         if not p.name.startswith("~$")]
+                parts = _latest_parts(sub)
                 if not parts:
                     continue
                 newest = max(p.stat().st_mtime for p in parts)
@@ -139,6 +209,11 @@ def register(registry, cfg: dict) -> int:
         out = []
         logs = sorted(ld.glob("sync_*.log"))
         if logs:
+            age_h = (datetime.now().timestamp() - logs[-1].stat().st_mtime) / 3600
+            age_txt = f"最新日志 {logs[-1].name} 更新于 {age_h:.1f} 小时前"
+            if age_h > 24:
+                age_txt += " ⚠️ 超24小时未滚动, 同步任务可能已停摆"
+            out.append(age_txt)
             tail = logs[-1].read_text("utf-8", errors="replace").splitlines()[-12:]
             out.append(f"== {logs[-1].name} 末尾12行 ==\n" + "\n".join(tail))
         rs = ld / "run_stdout.log"
@@ -153,12 +228,12 @@ def register(registry, cfg: dict) -> int:
         d = root / "data" / line / line
         if not d.is_dir():
             return f"[错误] 同步目录不存在: {d} (可用 query_batches 查看可用批次)"
-        files = [p for p in sorted(d.glob("Part*.xlsx")) if not p.name.startswith("~$")]
+        files = _latest_parts(d)
         if not files:
             return f"[错误] {d} 下没有 Part*.xlsx"
         today = pd.Timestamp(datetime.now().strftime("%Y-%m-%d"))
         done_vals = {"已结束", "终止"}
-        dist_total, stale_rows, today_skus = {}, [], set()
+        dist_total, stale_rows, today_rows = {}, [], []
         today_cnt, fresh_time, total = 0, None, 0
         for f in files:
             part = f.stem.split("-")[0].split("_")[0]
@@ -181,8 +256,16 @@ def register(registry, cfg: dict) -> int:
                     fresh_time = last
                 m = up >= today
                 today_cnt += int(m.sum())
-                today_skus.update(str(s).strip() for s in df.loc[m, sku_col].dropna()
-                                  if str(s).strip() and str(s).strip().lower() != "nan")
+                plabel = _part_label(f.stem)
+                for _, r in df[m].iterrows():
+                    today_rows.append((
+                        plabel,
+                        _s(r.get(sku_col)) or "?",
+                        _s(r.get("新机型号")),
+                        _s(r.get("审批状态")) or "?",
+                        _latest_node(r.get("审批记录"), _s(r.get("更新时间"))[:16]),
+                        _s(r.get("当前负责人")),
+                    ))
                 if stat is not None:
                     act = df[(~stat.isin(done_vals))
                              & (up < today - pd.Timedelta(days=int(stale_days)))]
@@ -196,14 +279,24 @@ def register(registry, cfg: dict) -> int:
                                            str(r.get("更新时间"))[:16]))
         lines = [f"目录: data/{line}/{line} ({len(files)}个Part, 共{total}单)",
                  "状态分布: " + " / ".join(f"{k}:{v}" for k, v in sorted(dist_total.items())),
-                 f"数据截至(最新更新时间): {str(fresh_time)[:16] if fresh_time is not None else '无'}",
-                 f"今日有动态: {today_cnt} 单, SKU: {', '.join(sorted(today_skus)[:12]) or '无'}"]
+                 f"数据截至(最新更新时间): {str(fresh_time)[:16] if fresh_time is not None else '无'}"]
+        stale_warn = _stale_note(fresh_time)
+        if stale_warn:
+            lines.append(stale_warn)  # 数据过旧时预警行紧跟数据截至, 防误读
+        lines.append(f"今日有动态: {today_cnt} 单" + ("(明细如下)" if today_rows else ""))
+        for pl, sku, model, st, node, owner in today_rows[:8]:
+            mid = f" {model}" if model and model != sku else ""
+            tail = f" | 当前负责人:{owner}" if owner else ""
+            lines.append(f"  · {sku}{mid} @ {pl} | 状态:{st} | 最新节点: {node}{tail}")
+        if len(today_rows) > 8:
+            lines.append(f"  …另有 {len(today_rows) - 8} 单今日动态未列出")
         stale_rows.sort(reverse=True)
         zombie = [r for r in stale_rows if r[0] > 90]
         recent = [r for r in stale_rows if r[0] <= 90]
         lines.append(f"停滞≥{stale_days}天且未完结: {len(stale_rows)} 单 "
-                     f"(其中>90天历史遗留 {len(zombie)} 单, 多为待人工填写的Part9, 不列入TOP)")
-        lines.append(f"近90天内停滞(建议关注) TOP:")
+                     f"(口径注: 按单据行不聚合, 天数=今天-最后更新时间(不归零); "
+                     f">90天历史遗留 {len(zombie)} 单多为待人工填写的Part9, 不列入TOP)")
+        lines.append(f"近90天内停滞TOP (口径=距最后更新天数; 同一SKU在多环节会重复出现):")
         for days, sku, part, st, t in recent[:max(1, min(int(top), 15))]:
             lines.append(f"  {sku} {part} 停滞{days}天 (状态:{st}, 最后更新:{t})")
         return clip("\n".join(lines), 3500)
@@ -268,7 +361,7 @@ def register(registry, cfg: dict) -> int:
         d = root / "data" / line / line
         if not d.is_dir():
             return f"[错误] 同步目录不存在: {d} (可用 query_batches 查看可用批次)"
-        files = [p for p in sorted(d.glob("Part*.xlsx")) if not p.name.startswith("~$")]
+        files = _latest_parts(d)
         if not files:
             return "[错误] 无Part文件"
         today = pd.Timestamp(datetime.now().strftime("%Y-%m-%d"))
@@ -278,6 +371,7 @@ def register(registry, cfg: dict) -> int:
         FULL = {"air": 60, "sea": 69}
         skus = {}   # sku -> {model, start, pending:set, created, last_up}
         seg_rows = []  # (超目标天数, idle, sku, part, target)
+        fresh_time = None  # 全目录最新「更新时间」, 用于数据新鲜度硬判
         for f in files:
             part_no = "".join(ch for ch in f.stem if ch.isdigit())[:1]
             if not part_no:
@@ -295,6 +389,10 @@ def register(registry, cfg: dict) -> int:
                        if "创建时间" in df.columns else None)
             updated = (pd.to_datetime(df["更新时间"], errors="coerce")
                        if "更新时间" in df.columns else None)
+            if updated is not None:
+                last = updated.max()
+                if pd.notna(last) and (fresh_time is None or last > fresh_time):
+                    fresh_time = last  # 全目录最新「更新时间」= 数据截至
             starts = None
             if part_no == "1" and "手机数据取得日期" in df.columns:
                 starts = pd.to_datetime(df["手机数据取得日期"], errors="coerce")
@@ -364,7 +462,12 @@ def register(registry, cfg: dict) -> int:
 
         out = [f"目录: data/{line}/{line}  口径: 全流程线 空运60/海运69(权威表), "
                f"临期阈值{warn_days}天, 在途=Part1~8审批中, >120天遗留不提醒; "
-               f"段级=环节内无进展超确认目标(近似)"]
+               f"段级停滞天数=今天-最后更新时间(归零), 对照该环节确认目标(近似, 按单据行可重复; "
+               f"注意与scan_sync_data的停滞口径不同: 归零差~1天且封顶线120vs90)"]
+        stale_warn = _stale_note(fresh_time)
+        if stale_warn:
+            out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
+        out.append(f"数据截至(最新更新时间): {str(fresh_time)[:16] if fresh_time is not None else '无'}")
         out.append(f"\n== 本周新增SKU({monday:%m-%d}起, {len(new_week)}个) ==")
         for c, sku, mv in new_week[:15]:
             out.append(f"  {sku} {mv} (创建 {c:%m-%d})")
@@ -374,7 +477,7 @@ def register(registry, cfg: dict) -> int:
         out.append(f"\n== 已超期(超全流程线, {len(over_list)}个; 另历史遗留{legacy}个不列) ==")
         for over, sku, mv, stuck, s, tag in over_list[:n]:
             out.append(f"  {sku} {mv} 已超{over}天[{tag}] (启动{s:%m-%d}, 卡{stuck})")
-        out.append(f"\n== 环节停滞超目标(近似段级, {len(seg_rows)}单) TOP ==")
+        out.append(f"\n== 环节停滞超目标(段级口径: 距最后更新vs环节目标, {len(seg_rows)}单, 行级可重复) TOP ==")
         for over_t, idle, sku, part, tgt in seg_rows[:n]:
             out.append(f"  {sku} {part} 停滞{idle}天/目标{tgt}天 (超{over_t}天)")
         return clip("\n".join(out), 3800)
@@ -436,7 +539,8 @@ def register(registry, cfg: dict) -> int:
     registry.register(Tool(
         "scan_sync_data",
         "实时扫描自动同步目录的Part*.xlsx(比预警清单新鲜): 状态分布/数据截至时间/"
-        "今日有动态的SKU/停滞超期TOP. line默认手机膜(重点), 后续可传手机壳.",
+        "今日有动态明细(每条给 SKU·型号·所在Part·审批状态·最新审批节点+操作人+时间·当前负责人)"
+        "/停滞超期TOP. line默认手机膜(重点), 后续可传手机壳.",
         {"type": "object", "properties": {
             "line": {"type": "string", "enum": ["手机膜", "手机壳"]},
             "stale_days": {"type": "integer", "minimum": 1, "description": "停滞阈值天数, 默认7"},
