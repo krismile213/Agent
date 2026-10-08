@@ -371,6 +371,7 @@ def register(registry, cfg: dict) -> int:
         FULL = {"air": 60, "sea": 69}
         skus = {}   # sku -> {model, start, pending:set, created, last_up}
         seg_rows = []  # (超目标天数, idle, sku, part, target)
+        part9_new = []  # (创建时间, sku, model, owner) Part9新单待办: 创建≤7天且审批中
         fresh_time = None  # 全目录最新「更新时间」, 用于数据新鲜度硬判
         for f in files:
             part_no = "".join(ch for ch in f.stem if ch.isdigit())[:1]
@@ -428,6 +429,14 @@ def register(registry, cfg: dict) -> int:
                             tgt = 35
                         if tgt < idle <= 120:
                             seg_rows.append((idle - tgt, idle, sku, part, tgt))
+                elif part_no == "9" and is_pending and c is not None and pd.notna(c):
+                    # 盲区补丁(2026-10-08): Part9 不进在途/段级口径(历史悬挂单全是噪声),
+                    # 但新落下的单没人盯 —— 只报创建≤7天的审批中单, 悬挂旧单忽略
+                    if (today - c.normalize()).days <= 7:
+                        owner = str(r.get("当前负责人", "") or "").strip()
+                        if owner.lower() == "nan":
+                            owner = ""
+                        part9_new.append((c, sku, mv, owner))
 
         new_week = sorted((info["created"], sku, info["model"])
                           for sku, info in skus.items()
@@ -463,7 +472,8 @@ def register(registry, cfg: dict) -> int:
         out = [f"目录: data/{line}/{line}  口径: 全流程线 空运60/海运69(权威表), "
                f"临期阈值{warn_days}天, 在途=Part1~8审批中, >120天遗留不提醒; "
                f"段级停滞天数=今天-最后更新时间(归零), 对照该环节确认目标(近似, 按单据行可重复; "
-               f"注意与scan_sync_data的停滞口径不同: 归零差~1天且封顶线120vs90)"]
+               f"注意与scan_sync_data的停滞口径不同: 归零差~1天且封顶线120vs90; "
+              f"Part9新单=创建≤7天且审批中, 悬挂旧单不提醒)"]
         stale_warn = _stale_note(fresh_time)
         if stale_warn:
             out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
@@ -480,6 +490,10 @@ def register(registry, cfg: dict) -> int:
         out.append(f"\n== 环节停滞超目标(段级口径: 距最后更新vs环节目标, {len(seg_rows)}单, 行级可重复) TOP ==")
         for over_t, idle, sku, part, tgt in seg_rows[:n]:
             out.append(f"  {sku} {part} 停滞{idle}天/目标{tgt}天 (超{over_t}天)")
+        part9_new.sort(key=lambda x: x[0])          # 最老的新单排前, 先到先办
+        out.append(f"\n== Part9新单待办(创建≤7天且审批中, {len(part9_new)}单; 悬挂旧单不在此列) ==")
+        for c9, sku9, mv9, owner9 in part9_new[:10]:
+            out.append(f"  {sku9} {mv9} (创建 {c9:%m-%d %H:%M}, 当前负责人: {owner9 or '—'})")
         return clip("\n".join(out), 3800)
 
     # ---------- 执行工具(write级, 需确认) ----------

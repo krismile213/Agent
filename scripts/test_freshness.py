@@ -82,6 +82,54 @@ def _skip_if_no_data() -> bool:
     return False
 
 
+def test_part9_new_offline():
+    """Part9 新单提醒(2026-10-08 盲区补丁): 只报创建≤7天且审批中的 Part9 单.
+
+    离线夹具, 不依赖真实数据: 新单(2天)必须进, 悬挂旧单(30天)与已结束单必须
+    完全不可见(它们不在在途/段级/新单任何一层)。
+    """
+    print("\n== Part9 新单提醒(离线夹具) ==")
+    import shutil
+    import pandas as pd
+    import agentcore as core
+    import plugins.workmain as wm
+    tmp = HERE / ".workbuddy" / "tmp_test_part9"
+    d = tmp / "data" / "手机膜" / "手机膜"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        today = pd.Timestamp.now().normalize()
+
+        def _row(sku, status, created, owner):
+            return {"新品SKU": sku, "型号": "M-Test", "审批状态": status,
+                    "创建时间": created.strftime("%Y-%m-%d %H:%M:%S"),
+                    "更新时间": created.strftime("%Y-%m-%d %H:%M:%S"),
+                    "当前负责人": owner}
+
+        rows9 = [_row("G901", "审批中", today - pd.Timedelta(days=2), "张三"),
+                 _row("G902", "审批中", today - pd.Timedelta(days=30), "李四"),
+                 _row("G903", "已结束", today - pd.Timedelta(days=1), "王五")]
+        pd.DataFrame(rows9).to_excel(
+            d / "Part9_新品环节检查-20261008000000.xlsx", index=False)
+        pd.DataFrame([_row("G901", "已结束",
+                           today - pd.Timedelta(days=40), "")]).to_excel(
+            d / "Part1_产品开发-20261008000000.xlsx", index=False)
+
+        reg = core.build_registry()
+        wm.register(reg, {"workmain_root": str(tmp)})
+        out = reg._tools["pipeline_alerts"].func(line="手机膜")
+        check("Part9新单层存在", "Part9新单待办" in out)
+        check("新单(2天)进Part9层", "G901" in out and "张三" in out)
+        check("悬挂旧单(30天)不进", "G902" not in out,
+              "Part9 旧单不得出现在任何信号层")
+        # G903(已结束/昨天创建)会进「本周新增SKU」层(口径=创建时间在本周, 不看状态),
+        # 但不得出现在 Part9 新单层
+        seg9 = out.split("== Part9新单待办", 1)[1] if "Part9新单待办" in out else ""
+        check("已结束单不进Part9层", "G903" not in seg9)
+        check("声明数量=1单", "1单" in out.split("== Part9新单待办")[1][:40])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_tools_real():
     print("\n== 真跑工具(只读本地, 零LLM) ==")
     import json
@@ -118,6 +166,16 @@ def test_tools_real():
     out_pipe = reg._tools["pipeline_alerts"].func(line="手机膜")
     check("pipeline 含数据截至行", "数据截至" in out_pipe)
     check("pipeline 口径注仍在", "口径: 全流程线" in out_pipe)
+    check("pipeline Part9新单层存在", "Part9新单待办" in out_pipe)
+    if "Part9新单待办" in out_pipe:
+        import re as _re
+        m9 = _re.search(r"Part9新单待办\([^)]*?, (\d+)单", out_pipe)
+        if m9:
+            n9 = int(m9.group(1))
+            lines9 = [l for l in out_pipe.split("== Part9新单待办", 1)[1].splitlines()
+                      if l.startswith("  ")]
+            check("Part9新单 声明与明细一致", len(lines9) == min(n9, 10),
+                  f"声明{n9}单, 展示{len(lines9)}行")
 
     out_sync = reg._tools["sync_status"].func()
     check("sync 含日志时效行", "小时前" in out_sync or "日志目录为空" in out_sync)
@@ -130,6 +188,7 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     test_stale_note()
     test_latest_parts()
+    test_part9_new_offline()
     if not _skip_if_no_data():
         test_tools_real()
     n_ok = sum(1 for _, ok in RESULTS if ok)
