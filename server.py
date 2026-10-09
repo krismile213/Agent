@@ -145,15 +145,18 @@ class WebPolicy:
     def __init__(self, sess: "SessionState"):
         self.sess = sess
 
-    def _ask(self, tool_name: str, preview: str, allow_always: bool) -> "PendingReq":
-        """推一张审批卡片并阻塞等待浏览器响应(返回未pop的req对象)."""
+    def _ask(self, tool_name: str, preview: str, allow_always: bool,
+             level: str = "write") -> "PendingReq":
+        """推一张审批卡片并阻塞等待浏览器响应(返回未pop的req对象).
+        level: 工具级别(read/write/external), 随事件下发 —— 平台 ApprovalCard
+        依赖它决定能否"总允许"(AI助手嵌入任务书 T01/§3.4 契约扩展)."""
         import storage
         req = PendingReq(tool_name, preview)
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("permission_request",
                                   {"id": req.id, "tool": tool_name,
-                                   "preview": preview})
+                                   "level": level, "preview": preview})
         req.ev.wait()  # 阻塞引擎线程直到浏览器审批(本地单用户, 不设超时)
         storage.approval(self.sess.name, "tool", tool_name,
                          "allowed" if req.approved else "denied")
@@ -165,16 +168,18 @@ class WebPolicy:
         if tool.level == "read" or tool.name in self.sess.always:
             return True
         if tool.level == "external":
-            req1 = self._ask(tool.name, tool.preview(kwargs), allow_always=False)
+            req1 = self._ask(tool.name, tool.preview(kwargs), allow_always=False,
+                             level="external")
             if not req1.approved:
                 return False
             req2 = self._ask(tool.name,
                              "【第二次确认 · 对外发送】草稿已确认, 即将实际发出"
                              "(不可撤回):\n" + tool.preview(kwargs)[:1200],
-                             allow_always=False)
+                             allow_always=False, level="external")
             req2.always = False  # external 不吃"总允许"
             return req2.approved
-        req = self._ask(tool.name, tool.preview(kwargs), allow_always=True)
+        req = self._ask(tool.name, tool.preview(kwargs), allow_always=True,
+                        level=tool.level)
         return req.approved
 
 
@@ -190,7 +195,9 @@ class WebPlanConfirmer:
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("plan_request",
-                                  {"id": req.id, "plan": plan[:4000]})
+                                  {"id": req.id, "plan": plan[:4000],
+                                   # 计划确认=授权执行后续动作, 级别保守按 write
+                                   "level": "write"})
         req.ev.wait()
         storage.approval(self.sess.name, "plan", "执行计划",
                          "allowed" if req.approved else "denied",
@@ -214,7 +221,9 @@ class WebStepConfirmer:
         PENDING[req.id] = req
         self.sess.emit_threadsafe("step_request",
                                   {"id": req.id, "step": i, "total": n,
-                                   "text": step_text[:500]})
+                                   "text": step_text[:500],
+                                   # 分步确认=授权继续执行, 同计划按 write
+                                   "level": "write"})
         req.ev.wait()
         import storage
         storage.approval(self.sess.name, "step", f"步骤{i}/{n}",
@@ -303,6 +312,22 @@ class AuthGate:
 
 
 app.add_middleware(AuthGate)
+
+
+def setup_cors(cfg: dict, target_app=None):
+    """可选 CORS: 默认关闭; 仅当 config.json 配了 cors_allow_origins 白名单才挂载
+    (为将来异域/本地直连调试留后路, 平台 BFF 同源代理场景不需要 —— 任务书 T01/§3.3).
+    ⚠️ 必须在 AuthGate 之后 add: 后加的在中间件链外层, OPTIONS 预检才由 CORS 处理.
+    target_app: 缺省挂全局 app; 测试可传独立 FastAPI 实例."""
+    allowed = [str(x) for x in (cfg.get("cors_allow_origins") or []) if x]
+    if not allowed:
+        return
+    from fastapi.middleware.cors import CORSMiddleware
+    target = target_app if target_app is not None else app
+    target.add_middleware(CORSMiddleware, allow_origins=allowed,
+                          allow_credentials=True, allow_methods=["*"],
+                          allow_headers=["*"])
+    core.log(f"[cors] 已启用白名单: {allowed}")
 
 
 class LoginBody(BaseModel):
@@ -472,8 +497,26 @@ async def chat(body: ChatBody, request: Request):
     s.cancel.clear()
     s.running = True
     s.send("running", {"value": True})
+    # 平台上下文(AI助手嵌入 T04): BFF 每轮带 X-Plat-Context(JSON)。
+    # ⚠️ HTTP 头值只允许 latin-1: 含中文(品类/页面名)时 BFF 必须 percent-encode
+    # (urllib.parse.quote), 否则转发时就抛 UnicodeEncodeError。这里先按原样解析
+    # (ASCII JSON), 失败再按 URL 编码解析 —— 两种都兼容; 全失败静默忽略,
+    # 行为与现状完全一致(向后兼容)。
+    raw_ctx = request.headers.get("x-plat-context") or ""
+    plat_ctx: dict = {}
+    if raw_ctx:
+        obj = None
+        try:
+            obj = json.loads(raw_ctx)
+        except Exception:
+            try:
+                from urllib.parse import unquote
+                obj = json.loads(unquote(raw_ctx))
+            except Exception:
+                obj = None
+        plat_ctx = obj if isinstance(obj, dict) else {}
     core.log(f"[work] session={s.name} plan={body.plan} stepwise={body.stepwise} "
-             f"history={len(s.history)}")
+             f"history={len(s.history)} plat_ctx={bool(plat_ctx)}")
 
     def work():
         try:
@@ -486,12 +529,14 @@ async def chat(body: ChatBody, request: Request):
                                            stepwise=body.stepwise,
                                            step_confirm=WebStepConfirmer(s)
                                            if body.stepwise else None,
-                                           inject=s.inbox)
+                                           inject=s.inbox,
+                                           plat_ctx=plat_ctx or None)
             else:
                 answer = core.run_task(s.client, REG, WebPolicy(s), s.transcript,
                                        s.history, body.message, CFG,
                                        emit=s.emit_threadsafe, cancel=s.cancel,
-                                       inject=s.inbox)
+                                       inject=s.inbox,
+                                       plat_ctx=plat_ctx or None)
             if body.reflect and answer and not answer.startswith(("[", "(")):
                 core.reflect_and_fix(s.client, REG, WebPolicy(s), s.transcript,
                                      s.history, start, answer, CFG,
@@ -887,6 +932,7 @@ def main():
     core.set_root(args.cwd)
     CFG = core.load_config()
     setup_auth(CFG)
+    setup_cors(CFG)
     global TASK_SEM
     TASK_SEM = threading.BoundedSemaphore(
         int((CFG.get("limits") or {}).get("max_concurrent_tasks", 3)))

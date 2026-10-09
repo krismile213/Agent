@@ -33,6 +33,8 @@ FAST = [
     ("Web新增端点", [sys.executable, "scripts/test_web_features.py"]),
     ("分层记忆+断点续跑", [sys.executable, "scripts/test_memory_ckpt.py"]),
     ("登录鉴权+多用户", [sys.executable, "scripts/test_auth.py"]),
+    ("平台上下文注入", [sys.executable, "scripts/test_plat_context.py"]),
+    ("平台只读工具", [sys.executable, "scripts/test_platform_tools.py"]),
     ("Web渲染器", ["node", "scripts/test_web_md.js"]),
     ("企业化三件套单测", [sys.executable, "scripts/test_enterprise.py", "--unit-only"]),
     ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),

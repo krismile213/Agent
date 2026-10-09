@@ -16,6 +16,7 @@ workmain 插件 — work-main 工作区的领域工具包(可选)
 """
 
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -579,4 +580,267 @@ def register(registry, cfg: dict) -> int:
             "caliber": {"type": "string", "enum": ["action", "system"]},
             "mode": {"type": "string", "enum": ["air", "sea"]}},
          "required": ["sku"]}, "write", t_run_route_check))
-    return 8
+    return 8 + _register_platform(registry, cfg)
+
+
+# ---------- platform_* · 平台后端只读直连（「AI 助手嵌入」任务书 T06, 2026-10-09） ----------
+# 唯一真源 = 平台后端 API(:8000), 禁止读 xlsx 副本 —— 否则与平台页面出现两份实现口径漂移。
+# ⚠️ 硬性要求 trust_env=False: 本机环境变量常驻 HTTP_PROXY=http://127.0.0.1:<随机端口>,
+#    requests 默认读环境变量代理 → 打给 127.0.0.1 的请求被丢进本机代理 →
+#    连不上/被代理 502(表现像"平台没起", 极难排查; 任务书 §5.1 规则4 实测坑)。
+
+try:
+    import requests as _requests
+except Exception:                       # 环境缺 requests 时工具仍可注册, 调用才降级
+    _requests = None
+
+_PLAT_SESSION = None
+
+# 脱敏关键词(小写比较): 命中即整键剔除 —— Agent 是数据上云的最后一跳,
+# 平台侧(T10)会脱敏, 这里再脱一遍做双保险(任务书 §5.3)。
+_SENS_SUBSTR = ("负责人", "操作人", "创建人", "姓名", "手机", "电话", "联系方式",
+                "备注", "owner", "creator", "operator", "phone", "mobile", "remark")
+_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+
+
+def _plat_session():
+    """复用的平台 HTTP session(全局一个, trust_env=False 只设一次)。"""
+    global _PLAT_SESSION
+    if _PLAT_SESSION is None:
+        s = _requests.Session()
+        s.trust_env = False             # 绕过本机代理 —— 硬性要求
+        _PLAT_SESSION = s
+    return _PLAT_SESSION
+
+
+def _plat_sanitize(obj):
+    """字段级白名单 + 11 位手机号掩码(138****8000)。"""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if any(s in kl for s in _SENS_SUBSTR):
+                continue
+            out[str(k)] = _plat_sanitize(v)
+        return out
+    if isinstance(obj, list):
+        return [_plat_sanitize(x) for x in obj]
+    if isinstance(obj, str):
+        return _PHONE_RE.sub(lambda m: m.group(0)[:3] + "****" + m.group(0)[7:], obj)
+    return obj
+
+
+def _plat_get(base: str, path: str, params: dict | None = None):
+    """平台后端 GET。任何失败都返回 (None, 人话错误文本) —— 降级不抛异常,
+    模型拿着错误文本可自愈(提示用户稍后重试/改用平台页面), 任务不中断。"""
+    if _requests is None:
+        return None, "[平台接口不可用] 运行环境缺少 requests, 无法调用平台后端。"
+    url = f"{base}/api/{str(path).strip('/')}"
+    try:
+        r = _plat_session().get(url, params=params or {}, timeout=(3, 30))
+    except Exception as e:
+        return None, (f"[平台接口不可用] {type(e).__name__}: {e}；"
+                      "请确认平台后端已启动(数据后台系统 start.py), 稍后重试。")
+    if r.status_code != 200:
+        return None, (f"[平台接口不可用] HTTP {r.status_code} ← {path}；"
+                      "请稍后重试或改用平台页面确认。")
+    try:
+        return r.json(), ""
+    except Exception:
+        return None, "[平台接口不可用] 响应不是 JSON, 平台后端版本可能不匹配。"
+
+
+def _plat_brief(obj, indent: int = 0, lines: list | None = None,
+                budget: int = 72) -> list:
+    """平台 JSON → 模型易读的缩进键值/列表文本, 控制总行数(budget)。"""
+    if lines is None:
+        lines = []
+    pad = "  " * indent
+    if len(lines) >= budget:
+        lines.append(pad + "…(截断)")
+        return lines
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if len(lines) >= budget:
+                lines.append(pad + "…(截断)")
+                break
+            if isinstance(v, (dict, list)) and v:
+                lines.append(f"{pad}{k}:")
+                _plat_brief(v, indent + 1, lines, budget)
+            else:
+                lines.append(f"{pad}{k}: {v if v is not None else '—'}")
+    elif isinstance(obj, list):
+        for x in obj[:48]:
+            if len(lines) >= budget:
+                lines.append(pad + f"…(截断)")
+                break
+            if isinstance(x, dict):
+                flat = " | ".join(f"{k}={v}" for k, v in x.items()
+                                  if not isinstance(v, (dict, list)))
+                lines.append(f"{pad}- {flat}" if flat else f"{pad}- (条目)")
+                for k, v in x.items():
+                    if isinstance(v, (dict, list)) and v:
+                        lines.append(f"{pad}  {k}:")
+                        _plat_brief(v, indent + 2, lines, budget)
+            else:
+                lines.append(f"{pad}- {x}")
+        else:
+            pass
+    return lines
+
+
+def _register_platform(registry, cfg: dict) -> int:
+    """注册 10 个 platform_* 只读工具(全部 level=read; 平台写接口一律不接)。"""
+    base = str(cfg.get("platform_root") or "http://127.0.0.1:8000").rstrip("/")
+    CAT = {"type": "string", "enum": ["手机膜", "手机壳"],
+           "description": "品类, 缺省=上下文当前品类或手机膜"}
+
+    def _out(obj, err=""):
+        if obj is None:
+            return err
+        return clip("\n".join(_plat_brief(_plat_sanitize(obj))), 3800)
+
+    def t_platform_batches(category=None) -> str:
+        obj, err = _plat_get(base, "batches", {"category": category or ""})
+        return _out(obj, err)
+
+    def t_platform_overview(batch: str, category=None) -> str:
+        obj, err = _plat_get(base, f"overview/{batch}", {"category": category or ""})
+        return _out(obj, err)
+
+    def t_platform_sku_route(sku: str, caliber=None, category=None) -> str:
+        obj, err = _plat_get(base, f"review/sku/{sku}",
+                             {"category": category or "", "caliber": caliber or ""})
+        return _out(obj, err)
+
+    def t_platform_alerts(category=None, priority=None) -> str:
+        obj, err = _plat_get(base, "alerts", {"category": category or ""})
+        if obj is None:
+            return err
+        if priority:                     # 平台接口不认 priority, 在工具层按分组键过滤
+            pk = str(priority).lower()
+            picked = {k: v for k, v in obj.items() if isinstance(v, (dict, list))
+                      and pk in str(k).lower()}
+            if picked:
+                obj = picked
+        return _out(obj)
+
+    def t_platform_transport(category=None) -> str:
+        obj, err = _plat_get(base, "transport", {"category": category or ""})
+        return _out(obj, err)
+
+    def t_platform_records(batch: str, part: str, page=None, pageSize=None,
+                           approvalNo=None, status=None, keyword=None,
+                           category=None) -> str:
+        q = {"category": category or ""}
+        for k, v in (("page", page), ("pageSize", pageSize),
+                     ("approvalNo", approvalNo), ("status", status),
+                     ("keyword", keyword)):
+            if v not in (None, ""):
+                q[k] = v
+        obj, err = _plat_get(base, f"records/{batch}/{part}", q)
+        return _out(obj, err)
+
+    def t_platform_inflight_overview(category=None) -> str:
+        obj, err = _plat_get(base, "inflight", {"category": category or ""})
+        return _out(obj, err)
+
+    def t_platform_inflight_alerts(category=None) -> str:
+        obj, err = _plat_get(base, "inflight/alerts", {"category": category or ""})
+        return _out(obj, err)
+
+    def t_platform_daily_report(category=None) -> str:
+        # 只读列表; 平台的生成(POST)与下载接口一律不调(任务书 §7 边界)
+        obj, err = _plat_get(base, "inflight/daily-report", {"category": category or ""})
+        return _out(obj, err)
+
+    def t_platform_deltas(days=None, sku=None, category=None) -> str:
+        q = {"category": category or ""}
+        if days not in (None, ""):
+            q["days"] = days
+        if sku not in (None, ""):
+            q["sku"] = sku
+        obj, err = _plat_get(base, "deltas", q)
+        return _out(obj, err)
+
+    reg = registry.register
+    reg(Tool(
+        "platform_batches",
+        "列出平台当前品类的所有数据批次(平台后端唯一真源)。"
+        "问题涉及'有哪些批次/换批次'时用。",
+        {"type": "object", "properties": {"category": CAT}, "required": []},
+        "read", t_platform_batches))
+    reg(Tool(
+        "platform_overview",
+        "某批次的平台总览 KPI(单量/时效/异常概览)。'这个批次整体怎么样'时用。",
+        {"type": "object", "properties": {"batch": {"type": "string"},
+                                          "category": CAT},
+         "required": ["batch"]},
+        "read", t_platform_overview))
+    reg(Tool(
+        "platform_sku_route",
+        "某 SKU 在平台的路线达标/复盘现状(各 Part 实际vs目标、卡点、三部门终节点)。"
+        "用户问'某SKU卡在哪/进度如何'时用。与平台 SKU档案/路线达标页同源。",
+        {"type": "object", "properties": {
+            "sku": {"type": "string", "description": "SKU编号, 如 G531"},
+            "caliber": {"type": "string", "enum": ["action", "system"],
+                        "description": "复盘口径, 默认 action"},
+            "category": CAT},
+         "required": ["sku"]},
+        "read", t_platform_sku_route))
+    reg(Tool(
+        "platform_alerts",
+        "平台加急预警明细(P0/P1/P2 + 盯数清单 + 数据新鲜度)。"
+        "用户问'今天加急/最急的单'时用。与平台加急预警页同源。",
+        {"type": "object", "properties": {
+            "category": CAT,
+            "priority": {"type": "string", "enum": ["P0", "P1", "P2"],
+                         "description": "可选, 只看某一优先级"}},
+         "required": []},
+        "read", t_platform_alerts))
+    reg(Tool(
+        "platform_transport",
+        "平台货件运输看板(逐票判定 + 渠道/运输方式聚合)。运输闭环/海运空运相关问答用。",
+        {"type": "object", "properties": {"category": CAT}, "required": []},
+        "read", t_platform_transport))
+    reg(Tool(
+        "platform_records",
+        "平台明细分页查询(按批次+Part, 可按审批号/状态/关键词过滤)。"
+        "'找某张单/某状态单据'时用。返回不含创建人/责任人(脱敏)。",
+        {"type": "object", "properties": {
+            "batch": {"type": "string"}, "part": {"type": "string"},
+            "page": {"type": "integer", "minimum": 1},
+            "pageSize": {"type": "integer", "minimum": 1, "maximum": 200},
+            "approvalNo": {"type": "string"}, "status": {"type": "string"},
+            "keyword": {"type": "string"}, "category": CAT},
+         "required": ["batch", "part"]},
+        "read", t_platform_records))
+    reg(Tool(
+        "platform_inflight_overview",
+        "平台事中总览: 在研 SKU 清单 + KPI(当前停留环节/距超时)。"
+        "'在研有哪些/事中整体情况'时用。",
+        {"type": "object", "properties": {"category": CAT}, "required": []},
+        "read", t_platform_inflight_overview))
+    reg(Tool(
+        "platform_inflight_alerts",
+        "平台事中风险预警: 当日新超期/持续超期/临近超期(85%)。"
+        "用户问'哪些在研要超期'时用。",
+        {"type": "object", "properties": {"category": CAT}, "required": []},
+        "read", t_platform_inflight_alerts))
+    reg(Tool(
+        "platform_daily_report",
+        "列出平台已生成的事中日报(按日期, 只读)。不生成、不下载。",
+        {"type": "object", "properties": {"category": CAT}, "required": []},
+        "read", t_platform_daily_report))
+    reg(Tool(
+        "platform_deltas",
+        "平台单据增量(未闭环 SKU 新增单据追踪)。"
+        "用户问'这周多了哪些单据/最近变化'时用。",
+        {"type": "object", "properties": {
+            "days": {"type": "integer", "minimum": 1,
+                     "description": "统计区间天数, 默认30"},
+            "sku": {"type": "string", "description": "可选, 限定某 SKU"},
+            "category": CAT},
+         "required": []},
+        "read", t_platform_deltas))
+    return 10

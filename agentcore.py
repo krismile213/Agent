@@ -1263,14 +1263,84 @@ def list_checkpoints() -> list:
     return sorted(out, key=lambda c: c.get("ts", ""), reverse=True)
 
 
+# ---------- 平台上下文注入（AI助手嵌入 T04） ----------
+# 平台 BFF 每轮请求带 X-Plat-Context 头(当前页/品类/批次/选中SKU), Agent 在任务起步
+# 注入给模型。纪律(任务书 §4.2): 用户消息原样保留; 上下文恒定同一条 system 消息,
+# 每轮替换内容 —— 绝不每轮 append, 否则历史被"历史屏幕状态"塞满且换页残留误导。
+
+PLAT_CTX_MARK = "[平台上下文]"
+
+
+def render_plat_ctx(plat_ctx) -> str:
+    """平台上下文 dict → 注入文本; 空/非法/全空字段返回 ''(行为与现状一致)。"""
+    if not isinstance(plat_ctx, dict) or not plat_ctx:
+        return ""
+    page = str(plat_ctx.get("page_label") or "").strip()
+    pkey = str(plat_ctx.get("page") or "").strip()
+    seg = []
+    if page or pkey:
+        tail = f"(page={pkey})" if pkey and page and pkey != page else ""
+        seg.append(f"用户当前在平台的「{page or pkey}」页{tail}")
+    kv = []
+    if plat_ctx.get("category"):
+        kv.append(f"品类={plat_ctx['category']}")
+    if plat_ctx.get("batch"):
+        kv.append(f"当前批次={plat_ctx['batch']}")
+    if plat_ctx.get("selected_sku"):
+        kv.append(f"选中SKU={plat_ctx['selected_sku']}")
+    filt = plat_ctx.get("filters")
+    # 只有杂键、没有任何真实上下文字段 → 视为无效, 不注入(避免"选中SKU=(无)"噪声)
+    if not seg and not kv and not (isinstance(filt, dict) and filt):
+        return ""
+    kv.append("选中SKU=%s" % (str(plat_ctx.get("selected_sku") or "").strip()
+                              or "(无)"))
+    seg.append("；".join(kv))
+    if isinstance(filt, dict) and filt:
+        ftxt = "；".join(f"{k}={v}" for k, v in filt.items()
+                        if v not in ("", None))
+        if ftxt:
+            seg.append(f"该页筛选: {ftxt}")
+    if not seg:
+        return ""
+    return (f"{PLAT_CTX_MARK} " + "；\n".join(seg) + "。\n"
+            "回答涉及当前页/当前批次时, 默认以此上下文为准; "
+            "如用户显式给出别的批次/SKU, 以用户为准。")
+
+
+def inject_plat_ctx(history: list, plat_ctx, transcript=None) -> None:
+    """把平台上下文注入会话历史: 历史里恒定最多一条 [平台上下文] system 消息。
+    已有 → 原位替换(内容没变则不动, 避免重复落盘); 没有且 plat_ctx 非空 →
+    插到开头连续 system 块之后、第一条对话消息之前。plat_ctx 空 → 完全不动。"""
+    txt = render_plat_ctx(plat_ctx)
+    if not txt:
+        return
+    for i, m in enumerate(history):
+        if m.get("role") == "system" \
+                and str(m.get("content", "")).startswith(PLAT_CTX_MARK):
+            if m.get("content") == txt:
+                return
+            history[i] = {"role": "system", "content": txt}
+            if transcript is not None:
+                transcript.log("message", {"msg": history[i]})
+            return
+    idx = 0
+    while idx < len(history) and history[idx].get("role") == "system":
+        idx += 1
+    history.insert(idx, {"role": "system", "content": txt})
+    if transcript is not None:
+        transcript.log("message", {"msg": history[idx]})
+
+
 def run_task(client: LLMClient, registry: Registry, policy,
              transcript: Transcript, history: list, task: str, cfg: dict,
              emit=None, cancel=None, emit_end: bool = True,
-             inject: InstructionInbox | None = None) -> str:
+             inject: InstructionInbox | None = None,
+             plat_ctx: dict | None = None) -> str:
     """执行一个任务: 模型→工具→结果回灌→再决策, 直到产出最终回答(或达轮数上限).
     cancel: 可选 threading.Event, 置位后在轮/工具边界优雅停止(steering 的基础).
     inject: 可选 InstructionInbox, 任务中途追加的指令在轮/工具边界注入历史.
-    emit_end: 分步执行时中间步传False —— task_end 只代表"整个用户任务完成"."""
+    emit_end: 分步执行时中间步传False —— task_end 只代表"整个用户任务完成".
+    plat_ctx: 可选平台上下文(AI助手嵌入), 任务起步注入, 不改写用户消息."""
     emit = emit or (lambda kind, data: None)
     emit("task_start", {"task": task})
     import storage
@@ -1278,6 +1348,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
         getattr(transcript, "path", "?"))
     storage.task_begin(sess, parent=storage.current_task_id())
     write_checkpoint(sess, task, 0)  # 断点续跑: 起点落盘, 正常出口清除, 崩溃残留
+    inject_plat_ctx(history, plat_ctx, transcript)
     history.append({"role": "user", "content": task})
     transcript.log("message", {"msg": history[-1]})
 
@@ -1480,12 +1551,16 @@ PLAN_SYS = """你是任务规划器. 针对用户的任务, 结合可用工具�
 
 
 def propose_plan(client: LLMClient, registry: Registry, task: str,
-                 cfg: dict) -> str:
+                 cfg: dict, plat_ctx: dict | None = None) -> str:
     tools_desc = "\n".join(f"- {t.name}({'写' if t.level == 'write' else '读'}): "
                            f"{t.description}" for t in registry._tools.values())
-    msg = client.chat([
-        {"role": "system", "content": PLAN_SYS + "\n可用工具:\n" + tools_desc},
-        {"role": "user", "content": task}])
+    msgs = [{"role": "system",
+             "content": PLAN_SYS + "\n可用工具:\n" + tools_desc}]
+    ctx_txt = render_plat_ctx(plat_ctx)
+    if ctx_txt:                  # 计划生成也感知当前屏幕(临时列表, 不进持久历史)
+        msgs.append({"role": "system", "content": ctx_txt})
+    msgs.append({"role": "user", "content": task})
+    msg = client.chat(msgs)
     return (msg.get("content") or "").strip()
 
 
@@ -1493,25 +1568,30 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
                  confirm, transcript: Transcript, history: list, task: str,
                  cfg: dict, emit=None, cancel=None, stepwise: bool = False,
                  step_confirm=None,
-                 inject: InstructionInbox | None = None) -> str:
+                 inject: InstructionInbox | None = None,
+                 plat_ctx: dict | None = None) -> str:
     """计划模式: 生成计划 → confirm(plan)人工批准 → 执行.
     confirm(plan_text)->bool 由适配器提供(CLI=input确认, Web=审批收件箱).
     stepwise=True 分步执行: 计划按编号拆步, 每步执行完发 step_done 事件并调
     step_confirm(i, n, step_text, answer) -> ('continue'|'stop', 修改指令文本),
-    修改指令会注入历史影响后续步骤 —— 这就是计划中途转向."""
+    修改指令会注入历史影响后续步骤 —— 这就是计划中途转向.
+    plat_ctx: 平台上下文(同 run_task, 起步注入+传给计划生成)."""
     emit = emit or (lambda kind, data: None)
+    inject_plat_ctx(history, plat_ctx, transcript)
     if cancel is not None and cancel.is_set():
         return run_task(client, registry, policy, transcript, history,
-                        task, cfg, emit=emit, cancel=cancel, inject=inject)
+                        task, cfg, emit=emit, cancel=cancel, inject=inject,
+                        plat_ctx=plat_ctx)
     log("[plan] 生成计划中...")
-    plan = propose_plan(client, registry, task, cfg)
+    plan = propose_plan(client, registry, task, cfg, plat_ctx=plat_ctx)
     log(f"[plan] 计划已生成({len(plan)}字符)")
     if plan:
         log("[plan] 等待用户批准...")
     if not plan:
         emit("plan_rejected", {"plan": "(计划生成失败, 直接执行)"})
         return run_task(client, registry, policy, transcript, history,
-                        task, cfg, emit=emit, cancel=cancel, inject=inject)
+                        task, cfg, emit=emit, cancel=cancel, inject=inject,
+                        plat_ctx=plat_ctx)
     emit("plan", {"plan": plan})
     res = confirm(plan)
     if isinstance(res, tuple):          # (批准?, 附加要求文本)
@@ -1547,6 +1627,7 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
                            f"[计划执行 {i}/{len(steps)}] 原任务: {task[:200]}\n"
                            f"本步只做: {st}\n(完成本步即停, 后续步骤由用户决定是否继续)",
                            cfg, emit=emit, cancel=cancel, inject=inject,
+                           plat_ctx=plat_ctx,
                            emit_end=(i == len(steps)))  # 中间步不发task_end
             final = ans
             emit("step_done", {"step": i, "total": len(steps), "text": st})
@@ -1567,7 +1648,8 @@ def plan_and_run(client: LLMClient, registry: Registry, policy,
 
     task2 = task + "\n\n[已批准的执行计划, 请严格按计划执行]\n" + plan
     return run_task(client, registry, policy, transcript, history,
-                    task2, cfg, emit=emit, cancel=cancel, inject=inject)
+                    task2, cfg, emit=emit, cancel=cancel, inject=inject,
+                    plat_ctx=plat_ctx)
 
 
 def _split_plan_steps(plan: str) -> list:
