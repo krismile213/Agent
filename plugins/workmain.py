@@ -26,6 +26,13 @@ from mini_agent import Tool, clip
 
 DEFAULT_ROOT = r"C:\Users\dell\Desktop\work-main"
 
+# 口径单一真源: 停滞/在途的「历史遗留」封顶线(天), scan_sync_data 与 pipeline_alerts 共用.
+# 2026-10-10 由双口径(scan 90 / pipeline 120)统一为 120 —— 90 封顶曾把 91~120 天的
+# 审批中真实挂单(Part8 渠道仓到货等, 探针实测 155 条)错标成"历史遗留"挡在 TOP 之外,
+# G550 真实停滞 119 天两边都报不出。>120 天(2025 年悬挂的 Part9 老单等)仍排除。
+# 改此值请重跑 scripts/probe_stale_cap.py 量化翻转面; 运行时文案/docstring 均插值本常量。
+STALE_CAP_DAYS = 120
+
 # 路线复盘两套口径 → 汇总xlsx文件 (口径语义: action=动作映射 / system=系统业务时间列)
 ROUTE_FILES = {
     "action": "route_路线复盘_复盘文件.xlsx",
@@ -292,12 +299,12 @@ def register(registry, cfg: dict) -> int:
         if len(today_rows) > 8:
             lines.append(f"  …另有 {len(today_rows) - 8} 单今日动态未列出")
         stale_rows.sort(reverse=True)
-        zombie = [r for r in stale_rows if r[0] > 90]
-        recent = [r for r in stale_rows if r[0] <= 90]
+        zombie = [r for r in stale_rows if r[0] > STALE_CAP_DAYS]
+        recent = [r for r in stale_rows if r[0] <= STALE_CAP_DAYS]
         lines.append(f"停滞≥{stale_days}天且未完结: {len(stale_rows)} 单 "
                      f"(口径注: 按单据行不聚合, 天数=今天-最后更新时间(不归零); "
-                     f">90天历史遗留 {len(zombie)} 单多为待人工填写的Part9, 不列入TOP)")
-        lines.append(f"近90天内停滞TOP (口径=距最后更新天数; 同一SKU在多环节会重复出现):")
+                     f">{STALE_CAP_DAYS}天历史遗留 {len(zombie)} 单(多为悬挂老单), 不列入TOP)")
+        lines.append(f"近{STALE_CAP_DAYS}天内停滞TOP (口径=距最后更新天数; 同一SKU在多环节会重复出现):")
         for days, sku, part, st, t in recent[:max(1, min(int(top), 15))]:
             lines.append(f"  {sku} {part} 停滞{days}天 (状态:{st}, 最后更新:{t})")
         return clip("\n".join(lines), 3500)
@@ -354,9 +361,9 @@ def register(registry, cfg: dict) -> int:
 
     def t_pipeline_alerts(line: str = "手机膜", warn_days: int = 15,
                           top: int = 8) -> str:
-        """四层流程信号(权威表口径): 本周新增SKU / 全流程临期 / 已超期 / 环节停滞超目标.
+        f"""四层流程信号(权威表口径): 本周新增SKU / 全流程临期 / 已超期 / 环节停滞超目标.
         全流程线: 空运60/海运69(时效确认规则表·口径说明); 启动日=Part1手机数据取得日期
-        (缺省最早创建时间); 在途只看Part1~8; >120天历史遗留不提醒; 段级为近似口径
+        (缺省最早创建时间); 在途只看Part1~8; >{STALE_CAP_DAYS}天历史遗留不提醒; 段级为近似口径
         (环节内无进展超确认目标), 精确段口径以路线复盘为准."""
         import pandas as pd
         d = root / "data" / line / line
@@ -428,7 +435,7 @@ def register(registry, cfg: dict) -> int:
                         tgt = targets.get(part, 1)
                         if part == "Part8" and _sku_modes().get(sku) == "sea":
                             tgt = 35
-                        if tgt < idle <= 120:
+                        if tgt < idle <= STALE_CAP_DAYS:
                             seg_rows.append((idle - tgt, idle, sku, part, tgt))
                 elif part_no == "9" and is_pending and c is not None and pd.notna(c):
                     # 盲区补丁(2026-10-08): Part9 不进在途/段级口径(历史悬挂单全是噪声),
@@ -450,7 +457,7 @@ def register(registry, cfg: dict) -> int:
             if start is None or pd.isna(start):
                 continue
             used = int((today - start).days)
-            if used > 120:
+            if used > STALE_CAP_DAYS:
                 legacy += 1
                 continue
             stuck = "Part" + max(info["pending"])
@@ -471,9 +478,9 @@ def register(registry, cfg: dict) -> int:
         n = max(1, min(int(top), 12))
 
         out = [f"目录: data/{line}/{line}  口径: 全流程线 空运60/海运69(权威表), "
-               f"临期阈值{warn_days}天, 在途=Part1~8审批中, >120天遗留不提醒; "
+               f"临期阈值{warn_days}天, 在途=Part1~8审批中, >{STALE_CAP_DAYS}天遗留不提醒; "
                f"段级停滞天数=今天-最后更新时间(归零), 对照该环节确认目标(近似, 按单据行可重复; "
-               f"注意与scan_sync_data的停滞口径不同: 归零差~1天且封顶线120vs90; "
+               f"注意与scan_sync_data的停滞口径差异: 归零差~1天(封顶线已统一为{STALE_CAP_DAYS}天); "
               f"Part9新单=创建≤7天且审批中, 悬挂旧单不提醒)"]
         stale_warn = _stale_note(fresh_time)
         if stale_warn:

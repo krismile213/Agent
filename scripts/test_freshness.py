@@ -130,6 +130,75 @@ def test_part9_new_offline():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_stale_cap_offline():
+    """停滞封顶线统一(STALE_CAP_DAYS=120, 2026-10-10): 离线夹具, 不依赖真实数据.
+
+    决定性用例: 91~120 天区间的审批中单在 scan_sync_data 必须进 TOP(旧口径 90 封顶
+    会错标"历史遗留"); >120 天仍排除; 标签与取值成对(近N天/历史遗留 N=常量)。
+    pipeline_alerts 侧验证段级/全流程线封顶行为与统一前一致(120), 无翻转。
+    """
+    print("\n== 停滞封顶线统一 120(离线夹具) ==")
+    import shutil
+    import pandas as pd
+    import agentcore as core
+    import plugins.workmain as wm
+    check("单一真源 STALE_CAP_DAYS=120", wm.STALE_CAP_DAYS == 120,
+          str(getattr(wm, "STALE_CAP_DAYS", None)))
+    tmp = HERE / ".workbuddy" / "tmp_test_cap"
+    d = tmp / "data" / "手机膜" / "手机膜"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        today = pd.Timestamp.now().normalize()
+
+        def _row(sku, status, updated, created=None):
+            c = created or updated
+            return {"新品SKU": sku, "型号": "M-Test", "审批状态": status,
+                    "创建时间": c.strftime("%Y-%m-%d %H:%M:%S"),
+                    "更新时间": updated.strftime("%Y-%m-%d %H:%M:%S"),
+                    "当前负责人": "测试"}
+
+        # scan 口径行: days=(today-更新时间).days 不归零
+        rows1 = [_row("G801", "审批中", today - pd.Timedelta(days=95)),   # 91~120 区间
+                 _row("G804", "审批中", today - pd.Timedelta(days=85)),   # 旧口径内
+                 _row("G805", "已结束", today - pd.Timedelta(days=100))]  # 完结
+        rows8 = [_row("G802", "审批中", today - pd.Timedelta(days=110)),  # 91~120 区间
+                 _row("G803", "审批中", today - pd.Timedelta(days=125)),  # >120 遗留
+                 _row("G811", "审批中", today - pd.Timedelta(days=30),
+                      created=today - pd.Timedelta(days=10)),             # 段级用
+                 _row("G812", "审批中", today - pd.Timedelta(days=119))]  # 段级内但超全流程线
+        pd.DataFrame(rows1).to_excel(d / "Part1_产品开发-20261010000000.xlsx", index=False)
+        pd.DataFrame(rows8).to_excel(d / "Part8_新品渠道仓到货-20261010000000.xlsx", index=False)
+
+        reg = core.build_registry()
+        wm.register(reg, {"workmain_root": str(tmp)})
+
+        # --- scan_sync_data: 封顶 120 后 91~120 区间必须进 TOP ---
+        out = reg._tools["scan_sync_data"].func(line="手机膜")
+        check("标签=近120天", "近120天内停滞TOP" in out, out[:200])
+        check("标签=>120天历史遗留", "120天历史遗留" in out)
+        top_seg = out.split("近120天内停滞TOP", 1)[1] if "近120天内停滞TOP" in out else ""
+        check("95天单进TOP(决定性: 旧口径90封顶会错标遗留)", "G801" in top_seg)
+        check("110天单进TOP", "G802" in top_seg)
+        check("85天单进TOP", "G804" in top_seg)
+        check("125天单不进TOP(封顶语义不变)", "G803" not in top_seg)
+        check("125天单计入历史遗留", "G803" not in out or "历史遗留 1 单" in out
+              or "历史遗留 2 单" in out)
+        check("已结束单不进停滞层", "G805" not in top_seg)
+
+        # --- pipeline_alerts: 封顶行为与统一前一致, 无翻转 ---
+        outp = reg._tools["pipeline_alerts"].func(line="手机膜")
+        seg = outp.split("== 环节停滞超目标", 1)[1] if "== 环节停滞超目标" in outp else ""
+        check("标签=>120天遗留不提醒", "120天遗留不提醒" in outp)
+        check("口径注已更新(封顶线已统一)", "封顶线已统一为120天" in outp)
+        check("段级: 30天单进(30>目标15且<=120)", "G811" in seg)
+        check("段级: 125天单被段级封顶排除", "G803" not in seg)
+        check("段级: 119天单被超期层优先截走(既有行为)", "G812" not in seg
+              and "G812" in outp.split("== 已超期", 1)[1].split("== 环节停滞", 1)[0])
+        check("全流程线: 125天单计入历史遗留", "历史遗留1个" in outp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_tools_real():
     print("\n== 真跑工具(只读本地, 零LLM) ==")
     import json
@@ -189,6 +258,7 @@ def main():
     test_stale_note()
     test_latest_parts()
     test_part9_new_offline()
+    test_stale_cap_offline()
     if not _skip_if_no_data():
         test_tools_real()
     n_ok = sum(1 for _, ok in RESULTS if ok)

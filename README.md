@@ -92,7 +92,7 @@ def register(registry, cfg):
 | `query_sku_route` | 读 | 查SKU路线复盘现状（action/system 两套口径，带口径标签） |
 | `search_kb` | 读 | BM25 检索本地知识库（需先 `python agent/kb/build_kb.py` 建索引） |
 | `sync_status` | 读 | 钉钉同步定时任务最近日志 |
-| `scan_sync_data` | 读 | **实时扫描自动同步目录**：状态分布/数据截至/今日动态SKU/停滞TOP（僵尸单据>90天单独计数），line 参数默认手机膜、可切手机壳 |
+| `scan_sync_data` | 读 | **实时扫描自动同步目录**：状态分布/数据截至/今日动态SKU/停滞TOP（僵尸单据>120天单独计数，与 pipeline_alerts 封顶线统一，常量 `STALE_CAP_DAYS`），line 参数默认手机膜、可切手机壳 |
 | `pipeline_alerts` | 读 | **四层流程信号**（权威表口径）：本周新增SKU / 全流程临期（**空运60·海运69**，运输模式取自路线总览）/ 已超期 / 环节停滞超目标（近似段级，目标值动态读《时效确认规则表.xlsx》，Part8 海运按 35 天）；每条带SKU/型号/卡点/剩余天数，可直接用于催办 |
 | `run_route_check` | **写** | 重跑单SKU路线复盘（输出隔离到 agent_tmp，不覆盖正式汇总） |
 
