@@ -167,6 +167,11 @@ class LLMClient:
                     raise _FatalError(f"HTTP {r.status_code}: {r.text[:300]}")
                 data = r.json()
                 self._acc(data.get("usage"))
+                msg0 = (data.get("choices") or [{}])[0].get("message") or {}
+                if not msg0.get("tool_calls") and not (msg0.get("content") or "").strip():
+                    # 空响应: HTTP 200 但 message 无内容且无 tool_calls —— 服务端过载
+                    # 会这样秒回, 当作失败进重试链(2026-10-10 午后简报空壳教训)
+                    raise RuntimeError("空响应(无content且无tool_calls, 疑似服务端过载)")
                 br.record(True)
                 storage.llm_call(payload["model"],
                                  int((time.time() - t0) * 1000), "ok",
@@ -254,6 +259,10 @@ class LLMClient:
                 msg = {"role": "assistant", "content": "".join(content_parts)}
                 if tc_acc:
                     msg["tool_calls"] = [tc_acc[k] for k in sorted(tc_acc)]
+                if not msg.get("tool_calls") and not (msg.get("content") or "").strip():
+                    # 空流: HTTP 200 建连成功但一个字没吐就断了(服务端过载会这样),
+                    # 原逻辑当作成功返回 → 下游拿到空 answer 照写照推。视为失败进重试链。
+                    raise RuntimeError("空流(无content且无tool_calls, 疑似服务端过载掐断)")
                 u_out = usage or {"prompt_tokens": est_tokens(json.dumps(messages, ensure_ascii=False)),
                                   "completion_tokens": est_tokens(msg["content"] or "")}
                 u_out = dict(u_out)

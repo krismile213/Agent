@@ -21,6 +21,7 @@ DingTalkApprovalSync 的 09:00 / 14:30 之后). 本机 schtasks.exe 被安全策
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,42 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import agentcore as core  # noqa: E402
+
+
+# 简报正文下限(字符): 模板要求 280~480 字, 低于此视为被限流掐空, 不值得推送
+BRIEF_MIN_CHARS = 100
+
+
+def ensure_brief_answer(client, history: list, answer: str,
+                        min_len: int = BRIEF_MIN_CHARS,
+                        sleeps=(20, 40), sleep_fn=time.sleep) -> str:
+    """空简报兜底(2026-10-10 教训: 免费档 429/1305 过载把最终轮掐空,
+    run_task 返回空正文照样写盘推送, 群里收到空壳).
+
+    answer 过短时: 弹掉 history 尾部的空 assistant 消息, 追加"基于工具输出直接
+    生成简报"的纯生成指令(不带工具), 按退避间隔重试; 仍短则返回原值, 由调用方
+    决定不推送+非零退出 —— 宁可缺今天的简报, 不发空壳占位。
+    """
+    a = (answer or "").strip()
+    if len(a) >= min_len:
+        return a
+    while (history and history[-1].get("role") == "assistant"
+           and not (history[-1].get("content") or "").strip()
+           and not history[-1].get("tool_calls")):
+        history.pop()  # 空流残留, 留着会误导续生成
+    hint = ("工具调用已全部完成。请基于以上工具输出直接输出中文markdown简报"
+            "(280~480字, 按任务要求的六节结构), 不要再调用任何工具, 不要输出其他内容。")
+    for wait_s in sleeps:
+        sleep_fn(wait_s)  # 给限流桶留恢复时间, 立刻重试大概率还是 429
+        msgs = history + [{"role": "user", "content": hint}]
+        try:
+            a = (client.chat_stream(msgs).get("content") or "").strip()
+        except Exception as e:
+            core.log(f"  [空简报兜底] 重生成失败: {e}")
+            continue
+        if len(a) >= min_len:
+            return a
+    return (answer or "").strip()
 
 
 def build_readonly_registry(cfg: dict) -> core.Registry:
@@ -94,6 +131,8 @@ def main():
     transcript.log("end", {"reason": "brief", **client.usage})
     transcript.close()
 
+    answer = ensure_brief_answer(client, history, answer)
+
     brief_dir = HERE / "briefs"
     brief_dir.mkdir(exist_ok=True)
     out = brief_dir / f"{today}{suffix}.md"
@@ -102,15 +141,23 @@ def main():
     print(f"[{tag}] 简报已写入 {out}")
     print(f"[{tag}] {client.usage_summary()}")
 
+    ret = 0
     if args.push:
-        try:
-            import dingtalk_push
-            ok, msg = dingtalk_push.send(f"{tag} {today}",
-                                         answer[:1800] or "(空)")
-            print(f"[{tag}] 推送{'成功' if ok else '失败'}: {msg}")
-        except Exception as e:
-            print(f"[{tag}] 推送异常(不影响落盘): {e}")
-    return 0
+        if len((answer or "").strip()) < BRIEF_MIN_CHARS:
+            # 空壳防线: 数据都在(工具轮已成功), 只是生成被限流掐死 —— 不推送不占群,
+            # 退出码非0让计划任务面板可见, 人工/下次运行补上
+            print(f"[{tag}] ⚠️ 正文不足{BRIEF_MIN_CHARS}字(限流掐空), 已落盘但"
+                  f"不推送钉钉; 请稍后手动重跑 run_brief.bat 补发")
+            ret = 1
+        else:
+            try:
+                import dingtalk_push
+                ok, msg = dingtalk_push.send(f"{tag} {today}",
+                                             answer[:1800] or "(空)")
+                print(f"[{tag}] 推送{'成功' if ok else '失败'}: {msg}")
+            except Exception as e:
+                print(f"[{tag}] 推送异常(不影响落盘): {e}")
+    return ret
 
 
 if __name__ == "__main__":

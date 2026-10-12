@@ -30,6 +30,7 @@ FAST = [
     ("人工干预三件套", [sys.executable, "scripts/test_human_intervention.py"]),
     ("research防幻觉防线", [sys.executable, "scripts/test_research_guard.py"]),
     ("数据新鲜度防线", [sys.executable, "scripts/test_freshness.py"]),
+    ("空简报防线", [sys.executable, "scripts/test_brief_guard.py"]),
     ("Web新增端点", [sys.executable, "scripts/test_web_features.py"]),
     ("分层记忆+断点续跑", [sys.executable, "scripts/test_memory_ckpt.py"]),
     ("登录鉴权+多用户", [sys.executable, "scripts/test_auth.py"]),
