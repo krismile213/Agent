@@ -136,6 +136,40 @@ class SqliteTranscript:
         self._db.commit()
 
 
+# ---------------- 会话管理辅助(delete/rename 双存储支持) ----------------
+# 会话是「SQLite 主存储 ∪ 旧 JSONL」双轨: 新会话只落 SQLite, 老会话在 sessions/*.jsonl。
+# 侧栏(server.py /api/sessions)两个来源都会列出, 因此 delete/rename 的「存在性」判定
+# 也必须涵盖 SQLite —— 否则只会列出、却删/改不掉(SQLite-only 会话被误判 404)。
+
+def session_exists(session: str) -> bool:
+    """该会话是否存在于任一存储(SQLite 或旧 JSONL)。"""
+    try:
+        db = get_db()
+        row = db.execute("SELECT 1 FROM messages WHERE session=? LIMIT 1",
+                         (session,)).fetchone()
+        if row:
+            return True
+    except Exception:
+        pass
+    return (HERE / "sessions" / f"{session}.jsonl").exists()
+
+
+@_safe
+def delete_session(session: str) -> None:
+    """删除会话的 SQLite 镜像(JSONL 文件由调用方负责 unlink)。"""
+    db = get_db()
+    db.execute("DELETE FROM messages WHERE session=?", (session,))
+    db.commit()
+
+
+@_safe
+def rename_session(old: str, new: str) -> None:
+    """把会话的 SQLite 消息键从 old 迁移到 new(文件重命名由调用方负责)。"""
+    db = get_db()
+    db.execute("UPDATE messages SET session=? WHERE session=?", (new, old))
+    db.commit()
+
+
 # ---------------- 遥测: 任务/调用/工具/审批 ----------------
 
 _ctx = threading.local()  # task_id 线程上下文(子agent线程各自独立)

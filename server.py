@@ -806,13 +806,18 @@ async def rename_session(request: Request, name: str, body: RenameBody):
     new = _clean_session_name(body.new)
     if not new:
         return JSONResponse({"error": "新名称为空"}, 400)
+    new_sid = _scope(request, new)
     src = _sess_file(sid)
-    dst = _sess_file(_scope(request, new))
-    if not src.exists():
+    dst = _sess_file(new_sid)
+    # 会话双存储: 存在性/冲突判定都要涵盖 SQLite(否则 SQLite-only 会话改不了名)
+    import storage
+    if not src.exists() and not storage.session_exists(sid):
         return JSONResponse({"error": f"会话不存在: {name}"}, 404)
-    if new != name and dst.exists():
+    if new_sid != sid and (dst.exists() or storage.session_exists(new_sid)):
         return JSONResponse({"error": f"目标会话名已存在: {new}"}, 409)
-    src.rename(dst)
+    if src.exists():
+        src.rename(dst)
+    storage.rename_session(sid, new_sid)   # SQLite 键同步迁移(原实现漏了这步→改名后数据"丢失")
     if sid in SESS and not SESS[sid].running:
         SESS.pop(sid, None)  # 已加载的状态按旧名失效, 下次打开按新名重建
     return {"ok": True, "name": new}
@@ -824,18 +829,16 @@ async def delete_session(request: Request, name: str):
     s = SESS.get(sid)
     if s and s.running:
         return JSONResponse({"error": "任务运行中, 暂不能删除"}, 409)
+    # 会话双存储: SQLite 主存储 ∪ 旧 JSONL。存在性必须两者都认, 否则
+    # SQLite-only 会话(侧栏列得出来)会被这里误判 404 而删不掉。
     f = _sess_file(sid)
-    if not f.exists():
+    import storage
+    if not f.exists() and not storage.session_exists(sid):
         return JSONResponse({"error": f"会话不存在: {name}"}, 404)
-    f.unlink()
+    if f.exists():
+        f.unlink()
+    storage.delete_session(sid)   # SQLite 镜像清理(无条件, 不再落在 404 之后)
     SESS.pop(sid, None)
-    try:  # 遥测镜像同步清理(失败不影响主功能)
-        import storage
-        db = storage.get_db()
-        db.execute("DELETE FROM messages WHERE session=?", (sid,))
-        db.commit()
-    except Exception:
-        pass
     return {"ok": True}
 
 
