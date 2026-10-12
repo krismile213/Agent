@@ -79,16 +79,20 @@ def build_readonly_registry(cfg: dict) -> core.Registry:
     return reg
 
 
-TASK_TEMPLATE = """今日晨检({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。请依次完成:
-1) 用 sync_status 查看钉钉同步定时任务的运行状态。
+TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。请依次完成:
+1) 用 sync_status 查看钉钉同步定时任务的运行状态。工具输出第二行 "[结论]" 即权威判定
+   (✅成功/❌失败/⏳进行中): 结论为✅就写"同步正常", 严禁自行推断或编造故障原因
+   (如"数据库锁定"等日志里没有的错误); "数据截至"反映的是审批内容最后更新时间,
+   周末/节假日无审批时数据截至会自然停在上一场, 这不等于同步故障。
 2) 用 scan_sync_data 实时扫描: 状态分布 / 数据截至时间 / 今日有动态明细(含所在Part)。
 3) 用 pipeline_alerts 获取五层信号: 本周新增SKU / 全流程临期(空运60·海运69) /
    已超期 / 环节停滞超目标(近似段级) / Part9新单待办(创建≤7天且审批中)。
 4) 用 read_file 读取 流程复盘/output/预警_加急SKU.md 的前40行(不存在就跳过),
    仅作背景补充 —— 必须注明它是旧批次产物, 与实时数据冲突时以实时为准。
-输出中文markdown简报(280~480字), 分六节:
+输出中文markdown简报(280~480字, 首行标题写"{tag} {date}"), 分六节:
 ① 同步状态与数据截至(若任一工具输出带 ⚠️ 数据过旧/同步停摆告警, 必须把
-   "数据已N天未同步, ⑤的停滞天数含断供期偏大" 写在简报最顶部第一行, 再写其他内容)
+   "数据已N天未同步, ⑤的停滞天数含断供期偏大" 写在简报最顶部第一行, 再写其他内容;
+   注意: 数据截至久未变≠同步故障, 故障与否只看 sync_status 的 [结论] 行)
 ② 今日动态(若 pipeline_alerts 的 Part9新单待办 层有单, 逐条带SKU与当前负责人列出)
 ③ 本周新增SKU(编号+型号)
 ④ 临期预警(按剩余天数升序, 带卡点与空运/海运口径) ⑤ 已超期与环节停滞TOP(带超标天数,
@@ -118,7 +122,7 @@ def main():
     pm = now.hour >= 12          # 午后运行: 午后简报(独立文件/会话, 不覆盖晨检)
     tag = "午后简报" if pm else "晨检简报"
     suffix = "_pm" if pm else ""
-    task = TASK_TEMPLATE.format(date=today)
+    task = TASK_TEMPLATE.format(date=today, tag=tag)
 
     transcript = core.Transcript(
         f"brief_{now.strftime('%Y%m%d')}{suffix}")

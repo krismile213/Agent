@@ -253,12 +253,73 @@ def test_tools_real():
         check("超24h时有停摆告警格式", ("⚠️" in first) or True)  # 格式存在即可
 
 
+def test_sync_conclusion_offline():
+    """sync_status [结论]行(2026-10-12 防幻觉补丁): 工具必须自己给出
+    ✅成功/❌失败/⏳进行中的机器可判结论, 且结论行必须排在日志尾部之前,
+    杜绝 LLM 拿着"数据截至2天前"脑补"database is locked"这类不存在的故障.
+    """
+    print("\n== sync_status 结论行(离线夹具) ==")
+    import shutil
+    import time
+    import os
+    import agentcore as core
+    import plugins.workmain as wm
+    tmp = HERE / ".workbuddy" / "tmp_test_sync_concl"
+    ld = tmp / "dingtalk" / "logs"
+    ld.mkdir(parents=True, exist_ok=True)
+    try:
+        def _write(name, lines, age_min=0):
+            p = ld / name
+            p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            ts = time.time() - age_min * 60
+            os.utime(p, (ts, ts))
+
+        OK_LOG = [
+            "2026-10-12 08:39:25,528 [INFO] [ok] 获取 access_token 成功",
+            "2026-10-12 08:47:45,395 [INFO] 同步结束，用时 463s，导出 18 个文件",
+            "2026-10-12 08:47:52,189 [INFO] 体检完成，用时 6s：变更/警告 0 条",
+        ]
+        _write("sync_20261012.log", OK_LOG, age_min=90)
+        reg = core.build_registry()
+        wm.register(reg, {"workmain_root": str(tmp)})
+        out = reg._tools["sync_status"].func()
+        concl = [l for l in out.splitlines() if l.startswith("[结论]")]
+        check("有且仅有一条结论行", len(concl) == 1)
+        check("结论行在日志尾部之前",
+              out.index("[结论]") < out.index("== sync_20261012.log"))
+        check("成功场判✅", concl and "✅" in concl[0] and "2026-10-12 08:47:45" in concl[0])
+        check("成功结论带导出文件数", concl and "18个文件" in concl[0])
+        check("成功结论声明无ERROR", concl and "无 ERROR" in concl[0])
+
+        _write("sync_20261013.log", [
+            "2026-10-13 09:00:01 [INFO] 同步结束，用时 100s，导出 18 个文件",
+            "2026-10-13 09:00:02 [ERROR] 写 xlsx 失败: database is locked",
+        ], age_min=90)
+        out2 = reg._tools["sync_status"].func()
+        concl2 = [l for l in out2.splitlines() if l.startswith("[结论]")]
+        check("ERROR场判❌", concl2 and "❌" in concl2[0])
+        check("❌结论带ERROR条数", concl2 and "1 条 ERROR" in concl2[0])
+
+        _write("sync_20261014.log", OK_LOG[:1], age_min=0.5)
+        out3 = reg._tools["sync_status"].func()
+        concl3 = [l for l in out3.splitlines() if l.startswith("[结论]")]
+        check("刚更新无结束行判⏳", concl3 and "⏳" in concl3[0])
+
+        _write("sync_20261015.log", OK_LOG[:1], age_min=180)
+        out4 = reg._tools["sync_status"].func()
+        concl4 = [l for l in out4.splitlines() if l.startswith("[结论]")]
+        check("久未更新无结束行判❌中断", concl4 and "❌" in concl4[0] and "同步结束" in concl4[0])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     test_stale_note()
     test_latest_parts()
     test_part9_new_offline()
     test_stale_cap_offline()
+    test_sync_conclusion_offline()
     if not _skip_if_no_data():
         test_tools_real()
     n_ok = sum(1 for _, ok in RESULTS if ok)

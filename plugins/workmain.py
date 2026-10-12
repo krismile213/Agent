@@ -210,6 +210,34 @@ def register(registry, cfg: dict) -> int:
                  for i, h in enumerate(hits, 1)]
         return "\n\n".join(parts)
 
+    def _sync_conclusion(log_path) -> str:
+        """从同步日志解析结论行: ✅成功/❌失败/⏳进行中. 防 LLM 脑补故障原因."""
+        import re as _re
+        try:
+            lines = log_path.read_text("utf-8", errors="replace").splitlines()
+        except OSError:
+            return "[错误] 日志不可读"
+        if not lines:
+            return "⚠️ 日志为空, 无法判定"
+        err_lines = [l for l in lines if "ERROR" in l or "Traceback" in l]
+        ends = [l for l in lines if "同步结束" in l]
+        age_min = (datetime.now().timestamp() - log_path.stat().st_mtime) / 60
+        if not ends and age_min < 15:
+            return ("⏳ 同步可能仍在进行: 日志 %.0f 分钟前刚更新, 尚无'同步结束'行, "
+                    "暂勿判定成败" % age_min)
+        if not ends:
+            return "❌ 日志无'同步结束'行(疑似中断), 需人工查看日志尾部"
+        last = ends[-1]
+        m = _re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", last)
+        ts = m.group(1) if m else "时间未知"
+        mf = _re.search(r"导出 (\d+) 个文件", last)
+        files = mf.group(1) if mf else "?"
+        if err_lines:
+            return (f"❌ 最近同步 {ts} 有 {len(err_lines)} 条 ERROR "
+                    f"(末条: {err_lines[-1][:120]}), 需人工排查")
+        # 成功场次里若有 ERROR 也如实说
+        return f"✅ 最近同步成功: {ts} (导出{files}个文件, 全程无 ERROR)"
+
     def t_sync_status() -> str:
         ld = full("dingtalk/logs")
         if not ld.is_dir():
@@ -222,6 +250,7 @@ def register(registry, cfg: dict) -> int:
             if age_h > 24:
                 age_txt += " ⚠️ 超24小时未滚动, 同步任务可能已停摆"
             out.append(age_txt)
+            out.append("[结论] " + _sync_conclusion(logs[-1]))
             tail = logs[-1].read_text("utf-8", errors="replace").splitlines()[-12:]
             out.append(f"== {logs[-1].name} 末尾12行 ==\n" + "\n".join(tail))
         rs = ld / "run_stdout.log"
