@@ -41,6 +41,28 @@ def check(name, cond, extra=""):
         fails.append(name)
 
 
+# 会话隔离测试写在真实 sessions/ 目录, 上轮套件被 kill 会留下 proj*/alice@*/bob@*
+# 残留, 污染下一轮 "alice 只见自己的 proj" 与 rename 409 断言. 启动先扫测试产物
+# (真实会话名均为日期/adv_/brief_/sub_ 前缀, 这些模式不会误伤).
+_ARTIFACT_GLOBS = ("__t_*", "_t05_*", "proj.jsonl", "proj2.jsonl",
+                   "alice@*", "bob@*", "token@*")
+
+
+def clean_test_artifacts():
+    sd = core.HERE / "sessions"
+    n = 0
+    if sd.is_dir():
+        for pat in _ARTIFACT_GLOBS:
+            for f in sd.glob(pat):
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+    if n:
+        print(f"[cleanup] 清除上轮遗留测试产物 {n} 个")
+
+
 def wait_up():
     for _ in range(50):
         try:
@@ -115,6 +137,7 @@ def main() -> int:
     check("篡改签名被拒", srv.check_token(p + "." + ("0" * len(sig))) is None)
 
     # ===== 阶段3: 用户@会话 命名空间隔离 =====
+    clean_test_artifacts()
     sd = core.HERE / "sessions"
     sd.mkdir(exist_ok=True)
     (sd / "alice@proj.jsonl").write_text('{"role":"user","content":"hi"}\n', encoding="utf-8")

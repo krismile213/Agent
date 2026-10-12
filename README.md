@@ -171,15 +171,15 @@ push/PR 到 master 自动跑：**快速层测试**（离线，跳过依赖本地
 1. ~~**前端**：FastAPI + SSE 流式 Web UI（会话/审批收件箱/进度可视化）~~ ✅ 已交付（server.py + static/index.html，冒烟测试含审批闭环全通过）
 2. ~~**多轮对话增强**：跨会话记忆、任务级 checkpoint、中断后转向（steering）、SSE 断线补发~~ ✅ 已交付（MEMORY.md + save_memory / 悬空 tool_calls 自动修复 / cancel 检查点 + Web 停止按钮 / 事件 seq + Last-Event-ID 重放；测试 `scripts/test_upgrade.py` 全通过）。~~断点自动续跑~~ ✅ 已交付：任务在轮边界落盘 checkpoint(sessions/*.ckpt.json)，正常结束自动清除、崩溃自然残留 → 重启后 `/api/interrupted` 发现 + Web 横幅一键继续/放弃（`/api/resume` 复用 chat 全链路）；测试 `scripts/test_memory_ckpt.py` 19 项
 3. **人工干预增强**：~~任务停止/转向~~ ✅；~~计划审批~~ ✅ 已随计划模式交付；~~批量审批~~ ✅（Web 审批卡片可堆叠 + 一键全部允许/拒绝，`/api/approve_batch`；刷新后经 `/api/pending` 重建未决卡片）；~~外发双确认~~ ✅（新增 `external` 工具级——草稿确认→发送确认两段审批、不吃"本会话总允许"，配套 `dingtalk_send` 工具（dry_run 可验配置），无人值守注册表自动摘除 external 级）；~~任务中途追加指令~~ ✅（任务运行中直接输入即追加：`InstructionInbox` 在轮/工具边界注入历史，`/api/enqueue`，不打断执行）
-4. **reflection 例行化**：~~反思结论落库~~ ✅ 已升级为闭环（`reflect_and_fix`：反思发现具体问题 → 带工具自动修正一轮，有界不递归）；~~金标准评测集回归~~ ✅ 已交付（`eval/run_eval.py`，机制回归 16 用例 + 能力套件 7 用例）；待做：失败模式统计
+4. **reflection 例行化**：~~反思结论落库~~ ✅ 已升级为闭环（`reflect_and_fix`：反思发现具体问题 → 带工具自动修正一轮，有界不递归）；~~金标准评测集回归~~ ✅ 已交付（`eval/run_eval.py`，机制回归 16 用例 + 能力套件 7 用例）；~~失败模式统计~~ ✅ 已交付（`scripts/analyze_sessions.py`：聚合 agent.db 四表 + sessions/*.jsonl，按规则自动推导行动建议——幻觉工具名/路径误用/限流重试率/空结果任务/审批拒绝率，产物落 `analysis/`；单测 41 项入 fast 层）
 5. **工具生态**：~~插件 API → MCP 化（同一函数两种暴露）~~ ✅ 已交付（`mcp_server.py` 手写协议双向暴露 + `mcp_bridge.py` 接入外部 server，测试 9/9）；"工具市场"待做
 7. **多agent协作**：~~子agent扇出~~ ✅ + ~~计划模式~~ ✅ + ~~专属角色子agent(角色/工具白名单)~~ ✅ + ~~结果自动核查(verify核查员)~~ ✅ + ~~计划分步执行与中途转向~~ ✅；待做：Web 端步骤级文本修改指令、子agent间协作(结果互引)
 6. **治理**：用量/成本预算、审计报表、多用户 RBAC；钉钉**入站机器人**（第三前端，Stream 模式收消息）待企业应用开通消息权限后接入——出站推送与定时晨检已交付（见上节）
 
 ## 学习练习建议
 
-1. 写一个新插件（如 `plugins/file_organizer.py`：归档/去重工具包）
-2. 把 `reflect()` 升级成"发现问题自动修正一轮"的闭环
-3. 给 `run_task()` 加任务级 checkpoint：中断后能从最后一个工具调用续跑
-4. 用 FastAPI+SSE 给交互模式套一个最小 Web 前端（路线图第 1 步）
-5. 读 `sessions/*.jsonl`，复盘模型在哪些场景多走了弯路，针对性改工具描述
+1. 写一个新插件（如 `plugins/file_organizer.py`：归档/去重工具包）——纯练手项，业务无需求，建议个人分支写不合主仓库
+2. ~~把 `reflect()` 升级成"发现问题自动修正一轮"的闭环~~ ✅ 已有（`reflect_and_fix`，`max_rounds=1` 有界）
+3. 给 `run_task()` 加任务级 checkpoint：中断后能从最后一个工具调用续跑——会话级 checkpoint 已交付（轮边界落盘 + `/api/interrupted` + 一键继续），"从最后工具调用续"需序列化 history 且工具副作用不可重放，暂缓
+4. ~~用 FastAPI+SSE 给交互模式套一个最小 Web 前端~~ ✅ 已交付且超规格（server.py：流式对话/鉴权/多用户/审批 level/平台上下文）
+5. ~~读 `sessions/*.jsonl`，复盘模型在哪些场景多走了弯路，针对性改工具描述~~ ✅ 已交付（`scripts/analyze_sessions.py`，见路线图第 4 条；本轮据其结论已落实：系统提示禁臆造工具名 + 子agent注入工具白名单 + list_dir/read_file 易错点）
