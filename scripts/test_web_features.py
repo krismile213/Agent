@@ -39,6 +39,35 @@ def check(name, cond, extra=""):
         fails.append(name)
 
 
+# 本套件的会话测试写在真实 sessions/ 目录(server 的沙箱根), 历史上套件被 kill
+# 会留下 __t_*/__t05_* 残留文件, 污染下一轮 rename/delete 断言(409 误判等).
+# 启动先扫掉这些**测试产物**(真实会话名均为日期/adv_/brief_/sub_ 前缀, 不会误伤).
+_ARTIFACT_GLOBS = ("__t_*", "_t05_*", "proj.jsonl", "proj2.jsonl",
+                   "alice@*", "bob@*", "token@*")
+
+
+def clean_test_artifacts():
+    sd = core.HERE / "sessions"
+    n = 0
+    if sd.is_dir():
+        for pat in _ARTIFACT_GLOBS:
+            for f in sd.glob(pat):
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+    import storage
+    try:
+        db = storage.get_db()
+        db.execute("DELETE FROM messages WHERE session LIKE '__t05_%'")
+        db.commit()
+    except Exception:
+        pass
+    if n:
+        print(f"[cleanup] 清除上轮遗留测试产物 {n} 个")
+
+
 def main() -> int:
     srv.CFG = {"model": "test-model"}
     threading.Thread(
@@ -69,6 +98,7 @@ def main() -> int:
     check("raw 不存在 404", r.status_code == 404)
 
     # --- 会话重命名 ---
+    clean_test_artifacts()
     sd = core.HERE / "sessions"
     sd.mkdir(exist_ok=True)
     src = sd / "__t_ren.jsonl"
@@ -104,6 +134,59 @@ def main() -> int:
     check("delete 文件已删", not (sd / "__t_renamed.jsonl").exists())
     r = requests.delete(BASE + "/api/sessions/__t_renamed", timeout=5)
     check("delete 不存在 404", r.status_code == 404)
+
+    # --- 会话双存储: SQLite-only 会话也须能 delete/rename(防回归 95d6bc2) ---
+    # 侧栏(/api/sessions)把 SQLite 主存储 ∪ 旧 JSONL 都列出来; 但"只在 SQLite、
+    # 无对应 .jsonl"的会话, 旧实现的存在性判定只看 jsonl -> 误判 404 删/改不掉。
+    # 这里用一个纯 SQLite 会话(3 行)锁死该回归。
+    import storage
+    _db = storage.get_db()
+    _ren_from, _ren_to = "__t05_db_ren", "__t05_db_ren_to"
+    _del_id = "__t05_db_del"
+    for _sid in (_ren_from, _del_id):
+        for _i in range(3):
+            _db.execute("INSERT INTO messages VALUES (?,?,?,?)",
+                        (_sid, "2026-01-01T00:00:0%d" % _i, "message",
+                         '{"msg":{"role":"user","content":"t05 db %d"}}' % _i))
+    _db.commit()
+    _cnt = lambda s: _db.execute(
+        "SELECT COUNT(*) FROM messages WHERE session=?", (s,)).fetchone()[0]
+    try:
+        check("SQLite-only 会话确实只在 SQLite(无 jsonl)",
+              _cnt(_ren_from) == 3 and not (sd / (_ren_from + ".jsonl")).exists())
+
+        # 1) 侧栏可见
+        _names = [it.get("name") for it in
+                  requests.get(BASE + "/api/sessions", timeout=5).json()]
+        check("SQLite-only 出现在 /api/sessions 列表", _ren_from in _names)
+
+        # 2) rename -> 200 且新名正确; 随后直接查 SQLite: 键真迁移
+        r = requests.post(BASE + "/api/sessions/%s/rename" % _ren_from,
+                          json={"new": _ren_to}, timeout=5)
+        check("SQLite-only rename 200 且新名正确",
+              r.status_code == 200 and r.json().get("name") == _ren_to)
+        check("SQLite-only rename 后键真迁移(旧0/新3)",
+              _cnt(_ren_from) == 0 and _cnt(_ren_to) == 3)
+
+        # 3) delete 另一个 SQLite-only -> 200 且真清除
+        r = requests.delete(BASE + "/api/sessions/" + _del_id, timeout=5)
+        check("SQLite-only delete 200 且行真清除",
+              r.status_code == 200 and _cnt(_del_id) == 0)
+
+        # 4) 不存在者: 删/改都 404
+        r1 = requests.delete(BASE + "/api/sessions/_no_such_db_zzz", timeout=5)
+        r2 = requests.post(BASE + "/api/sessions/_no_such_db_zzz/rename",
+                           json={"new": "_no_such_db_yyy"}, timeout=5)
+        check("SQLite-only 不存在: delete 404 / rename 404",
+              r1.status_code == 404 and r2.status_code == 404)
+    finally:
+        _db.execute("DELETE FROM messages WHERE session LIKE '__t05_%'")
+        _db.commit()
+        for _p in sd.glob("__t05_db_*"):
+            _p.unlink(missing_ok=True)
+    check("SQLite-only 测试数据已清尾(库内0行)",
+          _db.execute("SELECT COUNT(*) FROM messages WHERE session LIKE "
+                      "'__t05_%'").fetchone()[0] == 0)
 
     # --- 名称清洗: 含路径成分的名字 ---
     (sd / "__t_dirty.jsonl").write_text("{}\n", encoding="utf-8")
