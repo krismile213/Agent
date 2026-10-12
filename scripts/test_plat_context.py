@@ -7,6 +7,7 @@ scripts/test_plat_context.py — AI助手嵌入 T04 平台上下文注入 离线
       每轮替换同一条不累积/内容不变不重复落盘/空上下文不动) /
       /api/chat 读 X-Plat-Context(带头/换头/不带头/非法JSON) /
       审批事件 level 字段(permission/plan/step, T01 契约扩展) /
+      /api/pending 返回体 level 字段(刷新重建卡片契约) /
       setup_cors 默认关闭 + 白名单挂载。
 requests + uvicorn 守护线程起真实服务, 端口 8815。
 """
@@ -279,6 +280,56 @@ def test_levels():
         srv.threading.Event = orig_event
 
 
+# ---------- /api/pending 带 level(T01 契约扩展: 刷新重建卡片无需猜级别) ----------
+
+def test_pending_level():
+    # PendingReq 默认 level 兼容旧的两参构造
+    check("PendingReq默认level=write",
+          srv.PendingReq("t", "p").level == "write")
+    check("PendingReq可显式传level",
+          srv.PendingReq("t", "p", "external").level == "external")
+
+    import asyncio
+    sid = "t_pending_lvl"
+    r_w = srv.PendingReq("write_file", "预览W", "write")
+    r_w.session = sid
+    r_e = srv.PendingReq("dingtalk_send", "预览E", "external")
+    r_e.session = sid
+    other = srv.PendingReq("tool_other", "预览O", "write")
+    other.session = "t_pending_other"
+    for r in (r_w, r_e, other):
+        srv.PENDING[r.id] = r
+    try:
+        items = asyncio.run(srv.list_pending(None, session=sid))["items"]
+        by_id = {it["id"]: it for it in items}
+        check("pending清单仅含本会话", set(by_id) == {r_w.id, r_e.id})
+        check("pending项含level字段", all("level" in it for it in items))
+        check("pending level值正确",
+              by_id[r_w.id].get("level") == "write"
+              and by_id[r_e.id].get("level") == "external")
+        check("pending保留原有id/tool/preview",
+              by_id[r_w.id].get("tool") == "write_file"
+              and by_id[r_w.id].get("preview") == "预览W")
+    finally:
+        srv.PENDING.clear()
+
+    # 防回归: permission_request SSE 载荷仍含 level(旧行为不许被改坏)
+    orig_event = srv.threading.Event
+    srv.threading.Event = _NoWaitEvent
+    try:
+        s = _FakeSess()
+        tool_w = type("T", (), {"name": "t_write", "level": "write",
+                                "preview": staticmethod(lambda kw: "预览")})()
+        srv.WebPolicy(s).allow(tool_w, {})
+        ev = [d for k, d in s.evts if k == "permission_request"]
+        check("回归: permission_request仍带level", len(ev) == 1
+              and ev[0].get("level") == "write"
+              and set(ev[0]) == {"id", "tool", "level", "preview"})
+    finally:
+        srv.threading.Event = orig_event
+        srv.PENDING.clear()
+
+
 # ---------- setup_cors ----------
 
 def test_cors():
@@ -310,6 +361,7 @@ def main() -> int:
     test_render()
     test_inject()
     test_levels()
+    test_pending_level()
     test_cors()
     test_endpoints()
     print(f"\n== {'全部通过' if not fails else f'失败 {len(fails)} 项'} ==")

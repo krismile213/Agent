@@ -126,10 +126,13 @@ def current_user(request: "Request") -> "str | None":
 class PendingReq:
     """一次待审批的操作(写工具或执行计划): 引擎线程 wait(), 审批端点 set()."""
 
-    def __init__(self, name: str, preview: str):
+    def __init__(self, name: str, preview: str, level: str = "write"):
         self.id = uuid.uuid4().hex[:12]
         self.tool_name = name
         self.preview = preview
+        # 工具级别(read/write/external): 随 SSE 事件下发, 也随 /api/pending 返回,
+        # 供前端刷新/换会话后重建审批卡片时还原级别(不必靠关键词猜)。
+        self.level = level
         self.session = ""
         self.ev = threading.Event()
         self.approved = False
@@ -151,7 +154,7 @@ class WebPolicy:
         level: 工具级别(read/write/external), 随事件下发 —— 平台 ApprovalCard
         依赖它决定能否"总允许"(AI助手嵌入任务书 T01/§3.4 契约扩展)."""
         import storage
-        req = PendingReq(tool_name, preview)
+        req = PendingReq(tool_name, preview, level)
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("permission_request",
@@ -191,7 +194,7 @@ class WebPlanConfirmer:
 
     def __call__(self, plan: str):
         import storage
-        req = PendingReq("执行计划", plan[:4000])
+        req = PendingReq("执行计划", plan[:4000], "write")
         req.session = self.sess.name
         PENDING[req.id] = req
         self.sess.emit_threadsafe("plan_request",
@@ -673,7 +676,8 @@ async def approve_batch(body: BatchApproveBody, request: Request):
 async def list_pending(request: Request, session: str):
     """当前会话未决审批清单 —— 前端刷新/换会话后据此重建审批卡片."""
     sid = _scope(request, session)
-    return {"items": [{"id": r.id, "tool": r.tool_name, "preview": r.preview}
+    return {"items": [{"id": r.id, "tool": r.tool_name, "level": r.level,
+                       "preview": r.preview}
                       for r in PENDING.values() if r.session == sid]}
 
 
