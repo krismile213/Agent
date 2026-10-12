@@ -43,7 +43,7 @@ def check(name, cond, extra=""):
 # 会留下 __t_*/__t05_* 残留文件, 污染下一轮 rename/delete 断言(409 误判等).
 # 启动先扫掉这些**测试产物**(真实会话名均为日期/adv_/brief_/sub_ 前缀, 不会误伤).
 _ARTIFACT_GLOBS = ("__t_*", "_t05_*", "proj.jsonl", "proj2.jsonl",
-                   "alice@*", "bob@*", "token@*")
+                   "alice@*", "bob@*", "token@*", "evil.jsonl")
 
 
 def clean_test_artifacts():
@@ -189,15 +189,18 @@ def main() -> int:
                       "'__t05_%'").fetchone()[0] == 0)
 
     # --- 名称清洗: 含路径成分的名字 ---
+    # 幂等: 先清上一轮可能残留的恶意名落点(../../evil 清洗后落到
+    # sessions/evil.jsonl), 否则本轮 rename 目标已存在 -> 409 -> 断言 FAIL。
+    (sd / "evil.jsonl").unlink(missing_ok=True)
     (sd / "__t_dirty.jsonl").write_text("{}\n", encoding="utf-8")
     r = requests.post(BASE + "/api/sessions/__t_dirty/rename",
                       json={"new": "../../evil"}, timeout=5)
-    cleaned = "".join(c for c in "../../evil" if c.isalnum() or c in "-_")  # "..evila" 形态
+    cleaned = "".join(c for c in "../../evil" if c.isalnum() or c in "-_")  # "evil" 形态(./ 被清洗)
     check("rename 恶意名被清洗(不落 sessions 外)",
           r.status_code == 200 and not (core.HERE.parent / "evil.jsonl").exists()
           and not (core.HERE / "evil.jsonl").exists())
     requests.delete(BASE + "/api/sessions/" + cleaned.replace(".", ""), timeout=5)
-    for p in sd.glob("__t_*"):
+    for p in list(sd.glob("__t_*")) + [sd / "evil.jsonl"]:
         p.unlink(missing_ok=True)
 
     # --- 断点续跑端点 ---
