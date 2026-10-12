@@ -605,8 +605,29 @@ _PLAT_SESSION = None
 
 # 脱敏关键词(小写比较): 命中即整键剔除 —— Agent 是数据上云的最后一跳,
 # 平台侧(T10)会脱敏, 这里再脱一遍做双保险(任务书 §5.3)。
-_SENS_SUBSTR = ("负责人", "操作人", "创建人", "姓名", "手机", "电话", "联系方式",
-                "备注", "owner", "creator", "operator", "phone", "mobile", "remark")
+# 词典口径 = 平台侧 backend/app/outbound_guard.py::SENSITIVE_KEY_SUBSTR 的逐条对齐(14→57);
+# 纪律: 只增不减 —— 子串匹配没有兜底, 删任一条都会让"一整类字段名"裸奔。
+#
+# 🔴 纪律(最容易犯的错, 会有人来"好心"加 name): **禁止加入裸 `name`**。
+#    实测真实响应里 `name / l4Name / partName / pendingPartName / _partName` 是
+#    合法业务键(批次名 / Part 名 / 段名), 裸 `name` 一次误伤 5 个键 → 直接把助手问瞎。
+#    name 族只收具体复合词(username / customername / realname / fullname)。
+_SENS_SUBSTR = (
+    # —— 原有 14 条(必须保留) ——
+    "负责人", "操作人", "创建人", "姓名", "手机", "电话", "联系方式",
+    "备注", "owner", "creator", "operator", "phone", "mobile", "remark",
+    # —— 上一轮 9 条 ——
+    "联系", "邮箱", "email", "mail", "微信", "wechat", "身份证", "idcard", "contact",
+    # —— 本轮新增 34 条(对齐平台侧, 真实数据取证) ——
+    "executor",
+    "申请人", "审核人", "审批人", "经办人", "对接人", "主管",
+    "收货人", "收件人", "寄件人", "处理人", "提交人", "跟进人", "执行人",
+    "用户", "客户",
+    "地址", "座机", "固话", "传真",
+    "handler", "approver", "applicant", "receiver", "consignee", "shipper",
+    "addr", "tel", "fax", "qq",
+    "username", "customername", "realname", "fullname",
+)
 _PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 
 

@@ -98,6 +98,45 @@ def test_sanitize():
           wm._plat_sanitize("单号 12345678901 前缀") == "单号 12345678901 前缀")
     check("脱敏: 非字符串标量原样", wm._plat_sanitize(42) == 42)
 
+    # —— T07 扩容(14→57): 真实数据实测缺口 + 零误伤守卫(纪律钉死) ——
+
+    # 1) 新命中: executor 与「历史审批人」是真实数据实测缺口(非推测);
+    #    再加 申请人 / 收货人 / 座机 / customerName / realName。
+    hit = wm._plat_sanitize({
+        "executor": "张三", "历史审批人": "李四",
+        "申请人": "王五", "收货人": "赵六", "座机": "010-1234",
+        "customerName": "Acme", "realName": "孙七",
+        "sku": "G531"})                     # sku 是合法业务键, 必须保留
+    hit_keys = ("executor", "历史审批人", "申请人", "收货人",
+                "座机", "customerName", "realName")
+    check("脱敏T07: 新词典命中键全剔",
+          all(k not in hit for k in hit_keys) and hit.get("sku") == "G531")
+
+    # 2) 嵌套: 新命中的键出现在嵌套 list 里也要被剔。
+    nested = wm._plat_sanitize({
+        "rows": [{"executor": "张三", "申请人": "王五", "节点": "签样"},
+                 {"收货人": "赵六", "座机": "010-1", "sku": "G531"}]})
+    check("脱敏T07: 新词典嵌套list内也剔",
+          nested == {"rows": [{"节点": "签样"}, {"sku": "G531"}]})
+
+    # 3) 零误伤守卫(必测): 平台真实响应里的合法业务键必须**原样保留**。
+    keep = wm._plat_sanitize({
+        "name": "Poco X8 批次", "l4Name": "L4", "partName": "Part1",
+        "pendingPartName": "P1", "_partName": "u", "审批编号": "SP-1",
+        "审批状态": "已通过", "审批结果": "同意", "审批记录": "rec",
+        "审批单标题": "标题", "新机型号": "X8", "参考型号": "X7", "序号": 1})
+    keep_keys = ("name", "l4Name", "partName", "pendingPartName", "_partName",
+                 "审批编号", "审批状态", "审批结果", "审批记录",
+                 "审批单标题", "新机型号", "参考型号", "序号")
+    check("脱敏T07: 零误伤守卫(合法业务键全保留)",
+          all(k in keep for k in keep_keys) and len(keep) == len(keep_keys))
+
+    # 4) 纪律: 词典禁裸 name; 条数恰为 57 且无重复。
+    check("纪律T07: 词典无裸 name", "name" not in wm._SENS_SUBSTR)
+    check("纪律T07: 词典 57 条且无重复",
+          len(wm._SENS_SUBSTR) == 57
+          and len(set(wm._SENS_SUBSTR)) == 57)
+
 
 # ---------- 渲染 ----------
 
