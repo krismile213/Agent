@@ -961,7 +961,15 @@ def main():
 
     url = f"http://127.0.0.1:{args.port}"
     print(f"[web] model={CFG['model']} 沙箱={core.ROOT} 工具={len(REG.names())}个")
-    print(f"[web] 鉴权: {'启用(用户数 %d, 未配secret则重启后需重新登录)' % len(AUTH['users']) if AUTH['on'] else '未启用(本机模式; 上网前在 config.json 配置 auth.users)'}")
+    if AUTH["on"]:
+        if not (AUTH["users"] or AUTH["sha"]):
+            print("[web] ⚠️ 鉴权已启用(配了Bearer token)但未配置任何登录用户 -> "
+                  "网页登录页会永远提示\"用户名或密码错误\"! "
+                  "请在 config.json 的 auth.users 添加 {\"用户名\": \"密码\"} 后重启")
+        print(f"[web] 鉴权: 启用(用户数 {len(AUTH['users'])}, "
+              f"未配secret则重启后需重新登录)")
+    else:
+        print("[web] 鉴权: 未启用(本机模式; 上网前在 config.json 配置 auth.users)")
     print(f"[web] serving on {url}  (Ctrl+C 停止)")
     if not args.no_open:
         threading.Timer(1.2, webbrowser.open, [url]).start()
