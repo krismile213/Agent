@@ -994,7 +994,15 @@ def main():
     ap.add_argument("--cwd", default=os.getcwd(), help="工作沙箱目录(默认当前目录)")
     ap.add_argument("--no-plugins", action="store_true", help="禁用全部插件")
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
-    args = ap.parse_args()
+    # 容错: README 的启动命令带行尾注释("python server.py # http://127.0.0.1:8765, ..."),
+    # 用户常把整行复制进终端。bash 里 # 是注释, 但 cmd / PowerShell 不是 —— 注释文字会被
+    # 当成参数塞给 argparse, 直接抛 "unrecognized arguments" 退出, 看着就像"服务启动不了"
+    # (2026-10-13 用户实际踩到: 报"命令 ... 无法执行")。这里把 "#" 及其后全部丢弃,
+    # 让文档里的命令在任何 shell 里都能原样跑起来。
+    _argv = sys.argv[1:]
+    if "#" in _argv:
+        _argv = _argv[:_argv.index("#")]
+    args = ap.parse_args(_argv)
 
     core.set_root(args.cwd)
     CFG = core.load_config()

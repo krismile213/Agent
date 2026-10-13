@@ -17,6 +17,8 @@
 //     发送/停止/新会话按钮真的绑上了事件、history 真的被请求过。
 //   T4 变异自检: 删掉发送按钮后, T1 与 T3 必须同时失败(证明防线测得出来,
 //     防止以后有人把测试改弱)。
+//   T5 出声防线: 注入一个顶层异常后, 全局兜底必须把它渲染成页面上的可见提示 ——
+//     脚本中断本身不可怕, 静默才可怕(用户只会描述成"点了没反应")。
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -117,12 +119,13 @@ function runPage(htmlText) {
 
   const documentStub = {
     body: makeEl(),
+    _created: 0,                              // createElement 次数(断言"提示真的渲染出来了")
     getElementById(id) {
       if (!ids.has(id)) return null;          // 与真实 DOM 一致: 不存在→null
       if (!els.has(id)) els.set(id, makeEl());
       return els.get(id);
     },
-    createElement() { return makeEl(); },
+    createElement() { this._created++; return makeEl(); },
   };
   const localStorageStub = {
     _s: {},
@@ -140,6 +143,14 @@ function runPage(htmlText) {
     prompt: () => "", confirm: () => true, alert: () => "",
     console,
     setTimeout, clearTimeout,
+    // 真实浏览器的 window.addEventListener: 记录事件名与回调 —— T3 断言"全局异常兜底已注册",
+    // T5 手动触发它, 验证"顶层抛错真的会渲染出可见提示"(而不是静默死)
+    _winListeners: [], _winHandlers: {},
+    addEventListener(ev, fn) {
+      this._winListeners.push(ev);
+      (this._winHandlers[ev] = this._winHandlers[ev] || []).push(fn);
+    },
+    removeEventListener() {},
   };
   sandbox.window = sandbox;                    // 浏览器里 window 即全局对象
 
@@ -170,6 +181,9 @@ function runPage(htmlText) {
      r.fetchCalls.some((u) => u.includes("/history")));
   ck("T3 退出登录按钮可见(鉴权下 initAuth 显示它)",
      r.els.get("logoutbtn") && r.els.get("logoutbtn").style.display === "");
+  ck("T3 注册了全局异常兜底(脚本错误/未处理Promise → 可见提示, 不再静默)",
+     r.sandbox._winListeners.includes("error") &&
+     r.sandbox._winListeners.includes("unhandledrejection"));
   r.detach();
 
   // ---------- T4: 变异自检(删发送按钮 → T1/T3 必须失败) ----------
@@ -187,6 +201,24 @@ function runPage(htmlText) {
   ck("T4 变异(删发送按钮)被动态检出(脚本抛错)", mr.threw !== null,
      mr.threw && String(mr.threw));
   mr.detach();
+
+  // ---------- T5: 顶层抛错必须"出声"(全局兜底把异常渲染成可见提示) ----------
+  // 这是本次故障真正的教训: 脚本中断本身不可怕, 可怕的是它静默 —— 用户只会说
+  // "点了没反应"。注入一个顶层异常, 断言全局兜底真的往页面写了提示节点。
+  const boom = html.replace('$("send").onclick = send;',
+                            'null.__boom__; $("send").onclick = send;');
+  const r5 = runPage(boom);
+  await new Promise((res) => setTimeout(res, 150));
+  const before5 = r5.sandbox.document._created;
+  (r5.sandbox._winHandlers.error || []).forEach((fn) => {
+    try { fn({ message: "boom", type: "error" }); } catch (_) {}
+  });
+  const after5 = r5.sandbox.document._created;
+  ck("T5 注入的顶层异常确实让脚本中断", r5.threw !== null, r5.threw && String(r5.threw));
+  ck("T5 全局兜底把它渲染成可见提示(不再是静默的'点了没反应')",
+     r5.sandbox._winListeners.includes("error") && after5 > before5,
+     `listeners=${r5.sandbox._winListeners.join(",")} created ${before5}->${after5}`);
+  r5.detach();
 
   if (fails) { console.log(`\n${fails} 项失败`); process.exit(1); }
   console.log("\n全部通过 — 前端装配防线有效");

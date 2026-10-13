@@ -151,7 +151,13 @@ def main():
                     help="分步执行计划: 每步之间暂停, 可继续/停止/输入修改指令")
     ap.add_argument("--no-plugins", action="store_true", help="禁用全部插件(纯通用模式)")
     ap.add_argument("--selftest", action="store_true", help="离线自检(不需要API Key)")
-    args = ap.parse_args()
+    # 容错: README 的命令带行尾注释, 用户常整行复制。cmd/PowerShell 里 # 不是注释,
+    # 注释文字会被当成任务内容(或未知参数)塞进来 —— 这里把 "#" 及其后丢弃,
+    # 让文档里的命令在任何 shell 里都能原样执行。(与 server.py 同一处理)
+    _argv = sys.argv[1:]
+    if "#" in _argv:
+        _argv = _argv[:_argv.index("#")]
+    args = ap.parse_args(_argv)
     core.set_root(args.cwd)
 
     cfg = core.load_config()

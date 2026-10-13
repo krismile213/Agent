@@ -9,16 +9,20 @@
 
 ```powershell
 cd C:\Users\dell\Desktop\Agent
-copy config.example.json config.json    # 填入 api_key
-python mini_agent.py --selftest         # 离线自检, 不消耗token
+copy config.example.json config.json
+python mini_agent.py --selftest
 python mini_agent.py "统计当前目录下所有 .py 文件的总行数, 写入 report.md"
-python mini_agent.py                    # 交互模式
-python mini_agent.py --reflect "..."    # 任务完成后自检反思(发现问题自动修正一轮)
-python mini_agent.py --plan "..."       # 计划模式: 先出计划人工批准再执行
-python mini_agent.py --no-plugins ...   # 纯通用模式(不加载领域插件)
-python mini_agent.py --cwd "任何目录" ... # 以任何目录为沙箱
-python mini_agent.py --session work --resume  # 恢复历史会话
+python mini_agent.py
+python mini_agent.py --reflect "..."
+python mini_agent.py --plan "..."
+python mini_agent.py --no-plugins ...
+python mini_agent.py --cwd "任何目录" ...
+python mini_agent.py --session work --resume
 ```
+
+> 逐行含义：`copy` 复制配置后填入 `api_key`；`--selftest` 离线自检不消耗 token；不带参数=交互模式；`--reflect` 任务后自检反思；`--plan` 先出计划人工批准再执行；`--no-plugins` 纯通用模式（不加载领域插件）；`--cwd` 以任何目录为沙箱；`--session work --resume` 恢复历史会话。
+>
+> ⚠️ **复制命令时只复制命令本身**：cmd.exe / PowerShell 里 `#` 不是注释，把行尾说明一起粘进去会被当成参数（`server.py` / `mini_agent.py` 已做容错，会自动丢弃 `#` 之后的文字，但其他脚本没有）。
 
 高级能力示例：`research` 工具让模型并行派出只读子agent分头调查（"用 research 并行查：A目录结构 + B文件里的X"）；计划模式把人的批准放在执行之前，适合影响面大的任务。
 
@@ -27,11 +31,14 @@ python mini_agent.py --session work --resume  # 恢复历史会话
 ## Web 前端（多轮对话 + 人工干预）
 
 ```powershell
-python server.py                # http://127.0.0.1:8765, 自动打开浏览器
+python server.py
 python server.py --port 9000 --cwd "任何目录"
 python server.py --no-plugins --no-open
-python scripts/smoke_web.py     # 端到端冒烟测试(含审批闭环)
+python scripts/smoke_web.py
 ```
+
+> `python server.py` 起在 **http://127.0.0.1:8765** 并自动打开浏览器；`--port 9000` 换端口；`--cwd` 换沙箱目录；`--no-plugins` 纯通用模式；`--no-open` 不自动开浏览器。最后一行是端到端冒烟测试（含审批闭环）。
+> ⚠️ 若报 `[Errno 10048] ... bind on 127.0.0.1:8765`，说明**已经有一个实例在跑**（不是启动失败）——先 `curl http://127.0.0.1:8765/api/health` 确认，要重启就先停旧实例（见文末「重启」）。
 
 网页功能：多轮对话、工具调用/结果实时流式展示（SSE）、**写操作审批收件箱**（diff 预览 + 允许/本会话总允许/拒绝）、**文件面板**（导入文件到沙箱 `uploads/`、目录浏览、点击下载 AI 生成的文件；敏感文件拒下载）、会话侧栏（历史会话恢复）、反思/计划/分步执行开关、任务停止与转向、token 用量统计。导入的文件用相对路径在消息里引用即可（如"分析 uploads/xx.xlsx"——文本文件直接读，xlsx 走 run_python/pandas）。**登录鉴权+多用户**：config.json 配 `auth.users` 即启用——登录页、未登录 401/跳转、侧栏退出按钮，各用户会话按 `用户@会话` 命名空间互相隔离（沙箱文件仍共享）；不配置则维持本机免登录模式。
 
@@ -103,10 +110,12 @@ def register(registry, cfg):
 ## 测试体系
 
 ```powershell
-python scripts/run_all.py                    # 快速层(秒级): selftest+单测+RAG检索质量
-python scripts/run_all.py --tier full        # 全量: +MCP双向+Web冒烟+各E2E+金标准评测(~15分钟)
-python scripts/run_all.py --tier full --skip mcp,eval   # 按需跳过
+python scripts/run_all.py
+python scripts/run_all.py --tier full
+python scripts/run_all.py --tier full --skip mcp,eval
 ```
+
+> 第一行=快速层（秒级：selftest+单测+RAG检索质量）；`--tier full` 全量（含 MCP 双向+Web 冒烟+各 E2E+金标准评测，约 15 分钟）；`--skip mcp,eval` 按需跳过。
 
 三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_rag / test_files / test_safety / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，23 用例 = 机制回归 16 + 能力套件 ability 7——对账找差/防幻觉/严格JSON/跨源冲突裁决/裸算力/多文件统计/精确格式，全部断言式判定带标准答案）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，约 70 条）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
 
@@ -129,10 +138,12 @@ python scripts/run_all.py --tier full --skip mcp,eval   # 按需跳过
 数据同步与计划任务框架在 `work-main/dingtalk/` 已存在，agent 侧只做消费：
 
 ```powershell
-python daily_brief.py            # 立即跑一次晨检: 查同步日志+预警清单 → briefs/<日期>.md
-python daily_brief.py --push     # 配置了webhook则同时推送到钉钉群
-python dingtalk_push.py --title "测试" --text "hello" --dry   # 推送工具(dry不发送)
+python daily_brief.py
+python daily_brief.py --push
+python dingtalk_push.py --title "测试" --text "hello" --dry
 ```
+
+> `daily_brief.py` 立即跑一次晨检（查同步日志+预警清单 → `briefs/<日期>.md`）；`--push` 配了 webhook 时同时推送到钉钉群；最后一行是推送工具（`--dry` 不真正发送）。
 
 - **无人值守安全**：晨检用只读注册表（写级工具全部摘除），挂计划任务也零副作用
 - **空简报防线（2026-10-10 事故后加）**：免费档限流（429/1305 过载）会把 LLM 流式响应掐空——HTTP 200 建连但一个字没吐。两层防护：① `agentcore` 的 chat/chat_stream 检测"空响应/空流"（无 content 且无 tool_calls）自动进重试链换模型；② `daily_brief` 对正文不足 100 字的简报基于已收集的工具输出退避重生成（20s/40s 两次），仍短则**只落盘不推送**并以退出码 1 结束（宁可缺一期简报，不发空壳占位；`Get-ScheduledTaskInfo` 的 LastTaskResult 非 0 可见）。单测 `scripts/test_brief_guard.py`（16 项，已入 fast 层）

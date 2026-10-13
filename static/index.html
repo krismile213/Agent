@@ -254,6 +254,21 @@ const pendingCards = new Map(); // 待审批卡片: id -> kind(tool|plan|step)
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+/* 全局兜底: 任何脚本异常/未处理的 Promise 都变成页面上的可见提示。
+   历史教训(2026-10-13): 顶层某句对 null 元素赋值抛 TypeError → 整段脚本静默死掉,
+   发送/停止/新建会话等按钮全部绑不上事件, 而静态页面照常渲染, 用户只能描述成
+   "点了没反应", 排查全靠猜。这里让任何异常都出声, 一眼看到根因。 */
+(function () {
+  const show = (tag, msg) => { try { notice("❌ " + tag + ": " + msg); } catch (_) {} };
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("error", (e) => show("前端脚本错误", (e && e.message) || "未知"));
+    window.addEventListener("unhandledrejection", (e) => {
+      const r = e && e.reason;
+      show("前端异步错误", (r && (r.message || String(r))) || "未知");
+    });
+  }
+})();
+
 function node(html) {
   const chat = $("chat");
   const d = document.createElement("div");
@@ -762,20 +777,31 @@ $("themebtn").onclick = () => {
 
 /* ---------- 发送 ---------- */
 async function send() {
-  const text = $("msg").value.trim();
-  if (!text || !cur) return;
-  $("msg").value = "";
-  if (running) {
-    // 任务执行中: 输入框即追加指令通道(不打断, 引擎在工具间隙注入)
-    const r = await fetch("/api/enqueue", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({session: cur, text})});
-    if (!r.ok) { const e = await r.json().catch(() => ({})); notice(e.error || "追加失败"); }
-    return;
+  try {
+    const text = $("msg").value.trim();
+    if (!text) return;
+    if (!cur) {
+      // 会话未就绪: 不静默 return(那正是"点了没反应"的成因), 明确提示并重建会话
+      notice("⚠️ 会话未就绪, 正在重建会话, 请再点一次发送");
+      newSession();
+      return;
+    }
+    $("msg").value = "";
+    if (running) {
+      // 任务执行中: 输入框即追加指令通道(不打断, 引擎在工具间隙注入)
+      const r = await fetch("/api/enqueue", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session: cur, text})});
+      if (!r.ok) { const e = await r.json().catch(() => ({})); notice(e.error || "追加失败"); }
+      return;
+    }
+    const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session: cur, message: text, reflect: $("reflect").checked,
+                            plan: $("planmode").checked, stepwise: $("stepmode").checked})});
+    if (!r.ok) { const e = await r.json().catch(() => ({})); notice(e.error || "发送失败"); }
+  } catch (err) {
+    // 网络异常/脚本异常也必须出声 —— 否则又回到"点了没反应"的静默黑洞
+    notice("❌ 发送失败: " + ((err && err.message) || err));
   }
-  const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({session: cur, message: text, reflect: $("reflect").checked,
-                          plan: $("planmode").checked, stepwise: $("stepmode").checked})});
-  if (!r.ok) { const e = await r.json().catch(() => ({})); notice(e.error || "发送失败"); }
 }
 $("send").onclick = send;
 $("stopbtn").onclick = async () => {
