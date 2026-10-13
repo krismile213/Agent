@@ -460,6 +460,9 @@ async def list_sessions(request: Request):
 async def session_history(request: Request, name: str):
     s = get_sess(_scope(request, name))
     items = []
+    # tool_call_id -> 工具名: 直播事件带名, 重放原来丢名只能靠顺序猜,
+    # 多 tool_calls 时会配错行 —— 这里建映射精确还原.
+    id2name: dict[str, str] = {}
     for m in s.history[1:]:
         r = m.get("role")
         if r == "user":
@@ -478,8 +481,13 @@ async def session_history(request: Request, name: str):
                 fn = c.get("function") or {}
                 items.append({"kind": "tool_call", "name": fn.get("name", "?"),
                               "args": (fn.get("arguments") or "")[:200]})
+                cid = c.get("id") or ""
+                if cid:  # 记 id->name; 空 id 不记, 避免空键串名
+                    id2name[cid] = fn.get("name", "?")
         elif r == "tool":
-            items.append({"kind": "tool_result", "name": "",
+            # 按 tool_call_id 精确取回工具名; 取不到(老数据/缺 id)留空串保持兼容
+            items.append({"kind": "tool_result",
+                          "name": id2name.get(m.get("tool_call_id") or "", ""),
                           "result": str(m.get("content"))[:1500]})
     return {"items": items, "usage": s.client.usage, "running": s.running}
 
