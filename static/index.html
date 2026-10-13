@@ -198,7 +198,14 @@
   <div id="side">
     <div style="display:flex; align-items:center; justify-content:space-between">
       <h1>mini_agent</h1>
-      <button id="themebtn" title="切换深浅主题" style="border:0;background:transparent;cursor:pointer;font-size:15px">🌙</button>
+      <span style="display:flex; align-items:center; gap:10px">
+        <!-- 退出登录: 默认隐藏, initAuth 鉴权登录成功后显示(见 JS initAuth)。
+             历史上漏加此元素导致 $("logoutbtn").onclick 抛 TypeError 整段脚本死掉
+             (发送/会话/文件全哑) — 删它前先看 scripts/test_web_ui.js 的装配防线 -->
+        <button id="logoutbtn" title="退出登录"
+                style="display:none;border:1px solid var(--line);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;border-radius:8px;padding:3px 10px">退出登录</button>
+        <button id="themebtn" title="切换深浅主题" style="border:0;background:transparent;cursor:pointer;font-size:15px">🌙</button>
+      </span>
     </div>
     <div class="sub">通用工作区助手</div>
     <button id="newbtn">＋ 新会话</button>
@@ -335,8 +342,10 @@ function mdCode(b) {
   return `<pre class="cb"><div class="cbh">${esc(b.lang || "code")}</div><code>${esc(b.code.replace(/\n$/, ""))}</code></pre>`;
 }
 function addBotMd(text) {
-  node('<div class="row bot"><div class="bubble md"></div></div>')
-    .querySelector(".bubble").innerHTML = renderMarkdown(text);
+  const b = node('<div class="row bot"><div class="bubble md"></div></div>')
+    .querySelector(".bubble");
+  b.innerHTML = renderMarkdown(text);
+  return b;   // 返回气泡节点: 调用方可在其上挂 dataset(如重播幂等的 raw 原文)
 }
 
 /* ---------- 工具卡片 ---------- */
@@ -531,7 +540,18 @@ function handle(ev) {
         lb.removeAttribute("id");
         lb.classList.add("md");
         lb.innerHTML = renderMarkdown(full);
-      } else addBotMd(full);
+        lb.dataset.raw = full;   // 留底原文, 供重播幂等比对
+      } else {
+        // 幂等: SSE 重连会整卷重播 evlog(新建 EventSource 时 lastEventId 归零),
+        // 已收尾的助手文本再收到一次不能重复起泡(2026-10-13 E2E 实测出现
+        // "两条完全相同回复", 数据层只有一条, 纯显示层重放复制品)。
+        const mds = $("chat").querySelectorAll(".row.bot .md");
+        const prev = mds[mds.length - 1];
+        if (!prev || prev.dataset.raw !== full) {
+          const b = addBotMd(full);
+          if (b) b.dataset.raw = full;
+        }
+      }
       const chat = $("chat"); chat.scrollTop = chat.scrollHeight;
       break;
     }
@@ -718,14 +738,17 @@ function newSession() {
 (async function initAuth() {
   try {
     const m = await (await fetch("/api/me")).json();
-    if (m.user) {
-      const b = $("logoutbtn");
+    const b = $("logoutbtn");
+    if (m.user && b) {
       b.style.display = "";
       b.title = "退出登录 (" + m.user + ")";
     }
   } catch (e) { /* 鉴权关闭或网络问题: 保持隐藏 */ }
 })();
-$("logoutbtn").onclick = async () => {
+// ⚠️ 顶层 wiring 必须对 $("id") 做存在性保护: 元素缺失时 null.onclick 抛 TypeError
+// 会杀死整段脚本(后面 send/stop/newbtn 全部绑不上), 2026-10-13 实际故障过。
+const _logoutBtn = $("logoutbtn");
+if (_logoutBtn) _logoutBtn.onclick = async () => {
   try { await fetch("/api/logout", {method: "POST"}); } catch (e) {}
   location.href = "/login";
 };

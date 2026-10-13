@@ -33,6 +33,7 @@ FAST = [
     ("失败模式复盘单测", [sys.executable, "scripts/test_session_analysis.py"]),
     ("空简报防线", [sys.executable, "scripts/test_brief_guard.py"]),
     ("Web新增端点", [sys.executable, "scripts/test_web_features.py"]),
+    ("Web前端装配防线", ["node", "scripts/test_web_ui.js"]),
     ("分层记忆+断点续跑", [sys.executable, "scripts/test_memory_ckpt.py"]),
     ("登录鉴权+多用户", [sys.executable, "scripts/test_auth.py"]),
     ("平台上下文注入", [sys.executable, "scripts/test_plat_context.py"]),

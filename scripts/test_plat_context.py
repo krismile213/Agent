@@ -7,6 +7,7 @@ scripts/test_plat_context.py — AI助手嵌入 T04 平台上下文注入 离线
       每轮替换同一条不累积/内容不变不重复落盘/空上下文不动) /
       /api/chat 读 X-Plat-Context(带头/换头/不带头/非法JSON) /
       审批事件 level 字段(permission/plan/step, T01 契约扩展) /
+      审批等待超时防线(无响应按拒绝自动解决, 引擎线程不挂死) /
       /api/pending 返回体 level 字段(刷新重建卡片契约) /
       setup_cors 默认关闭 + 白名单挂载。
 requests + uvicorn 守护线程起真实服务, 端口 8815。
@@ -234,20 +235,42 @@ class _FakeSess:
     def emit_threadsafe(self, kind, data):
         self.evts.append((kind, data))
         if kind == "permission_request":
-            # 模拟用户点"批准": 卡片推出来即置 approved, external 才能走到第二次确认
+            # 模拟用户秒点"批准": 卡片推出来即置 approved 并 set 事件
+            # (wait() 返回 True=已批准), external 才能走到第二次确认
             req = srv.PENDING.get(data.get("id"))
             if req is not None:
                 req.approved = True
+                req.ev.set()
 
 
-class _NoWaitEvent(threading.Event):
+class _InstantEvent(threading.Event):
     def wait(self, timeout=None):
-        return False  # 不阻塞(视为未批准)
+        return self.is_set()  # 不阻塞; FakeSess 已 set 即视为已批准
+
+
+class _NeverEvent(threading.Event):
+    def wait(self, timeout=None):
+        return False  # 永远不应答: 模拟审批方掉线/无响应(超时路径)
+
+
+class _TimeoutSess:
+    """超时场景假会话: 推卡片但不自动批准(审批方掉线), 收 permission_resolved"""
+
+    def __init__(self, name="t_appr_to"):
+        self.name = name
+        self.evts = []
+        self.always = set()
+
+    def emit_threadsafe(self, kind, data):
+        self.evts.append((kind, data))
+
+    def send(self, kind, data):
+        self.evts.append((kind, data))
 
 
 def test_levels():
     orig_event = srv.threading.Event
-    srv.threading.Event = _NoWaitEvent
+    srv.threading.Event = _InstantEvent
     try:
         s = _FakeSess()
         tool_w = type("T", (), {"name": "t_write", "level": "write",
@@ -278,6 +301,53 @@ def test_levels():
               and evs[0].get("level") == "write")
     finally:
         srv.threading.Event = orig_event
+
+
+# ---------- 审批等待超时防线(2026-10-13): 审批方掉线不得挂死引擎线程 ----------
+
+def test_approval_timeout():
+    """_wait_approval: wait() 返回 False(=无响应超时)时按拒绝自动解决:
+    PENDING 摘除 / 广播 permission_resolved(timeout=True) / 记账 timeout,
+    且 external 第一张卡超时即拒、不推第二张(防引擎线程永久占用
+    会话 running 与 TASK_SEM 槽位——2026-10-13 平台 BFF SSE 掉线事故)."""
+    import storage
+    orig_event = srv.threading.Event
+    srv.threading.Event = _NeverEvent
+    s = _TimeoutSess()
+    srv.SESS[s.name] = s
+    try:
+        tool_w = type("T", (), {"name": "t_to_write", "level": "write",
+                                "preview": staticmethod(lambda kw: "预览")})()
+        ok = srv.WebPolicy(s).allow(tool_w, {})
+        check("超时: write工具按拒绝(allow=False)", ok is False)
+        ev = [d for k, d in s.evts if k == "permission_request"]
+        check("超时: 只推1张卡", len(ev) == 1)
+        check("超时: PENDING已摘除",
+              all(d["id"] not in srv.PENDING for d in ev))
+        res = [d for k, d in s.evts if k == "permission_resolved"]
+        check("超时: 广播permission_resolved(timeout=True)",
+              len(res) == 1 and res[0].get("timeout") is True
+              and res[0].get("approved") is False)
+        row = storage.get_db().execute(
+            "SELECT decision FROM approvals WHERE session=? AND name=? "
+            "ORDER BY rowid DESC LIMIT 1", (s.name, "t_to_write")).fetchone()
+        check("超时: 记账decision=timeout",
+              row is not None and row[0] == "timeout")
+
+        # external: 第一张卡超时即拒, 不再推第二张
+        s2 = _TimeoutSess("t_appr_to_ext")
+        srv.SESS[s2.name] = s2
+        tool_e = type("T", (), {"name": "t_to_ext", "level": "external",
+                                "preview": staticmethod(lambda kw: "草稿")})()
+        ok2 = srv.WebPolicy(s2).allow(tool_e, {})
+        ev2 = [d for k, d in s2.evts if k == "permission_request"]
+        check("超时: external首卡超时即拒不推第二张",
+              ok2 is False and len(ev2) == 1)
+    finally:
+        srv.threading.Event = orig_event
+        srv.SESS.pop(s.name, None)
+        srv.SESS.pop("t_appr_to_ext", None)
+        srv.PENDING.clear()
 
 
 # ---------- /api/pending 带 level(T01 契约扩展: 刷新重建卡片无需猜级别) ----------
@@ -315,7 +385,7 @@ def test_pending_level():
 
     # 防回归: permission_request SSE 载荷仍含 level(旧行为不许被改坏)
     orig_event = srv.threading.Event
-    srv.threading.Event = _NoWaitEvent
+    srv.threading.Event = _InstantEvent
     try:
         s = _FakeSess()
         tool_w = type("T", (), {"name": "t_write", "level": "write",
@@ -361,6 +431,7 @@ def main() -> int:
     test_render()
     test_inject()
     test_levels()
+    test_approval_timeout()
     test_pending_level()
     test_cors()
     test_endpoints()

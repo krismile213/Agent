@@ -138,6 +138,35 @@ class PendingReq:
         self.approved = False
         self.always = False
         self.steer_text = ""  # 批准时附带的修改指令/附加要求
+        self.timed_out = False  # 等待超时(审批方无响应)置位, 区别于"用户明确拒绝"
+
+
+# 审批等待超时(秒): 浏览器/BFF 掉线或不应答时, 引擎线程不能无限期挂死 ——
+# 挂死会同时占住会话 running 态与 TASK_SEM 并发槽位, DB 任务行也会永远停在
+# running(2026-10-13 实测: 平台 BFF 的 SSE 掉线后, run_python 审批无人应答,
+# 线程挂死 7 分钟+, 会话发送全部沦为"追加指令"无人消费)。
+# 取值: config.json 的 web.approval_wait_s, 缺省 900s, 下限 30s 防误配成 0。
+# ⚠️ 必须运行时读 CFG: main() 才 load_config(), import 期 CFG 还是空 dict。
+def _approval_wait_s() -> int:
+    return max(30, int(((CFG.get("web") or {}).get("approval_wait_s") or 900)))
+
+
+def _wait_approval(req: "PendingReq") -> bool:
+    """带超时地等待一次审批. 返回 True=收到明确结果(允许/拒绝); False=超时无响应.
+    超时按拒绝解决: 摘除待决项、置拒绝、广播 permission_resolved(timeout=True),
+    让阻塞中的引擎线程照常收尾(拿到"[用户拒绝]"结果继续或退出), 不会永久挂死."""
+    if req.ev.wait(timeout=_approval_wait_s()):
+        return True
+    PENDING.pop(req.id, None)
+    req.approved = False
+    req.timed_out = True
+    sess = SESS.get(req.session)
+    if sess:
+        sess.send("permission_resolved",
+                  {"id": req.id, "approved": False, "timeout": True})
+    core.log(f"[approval] 等待超时({_approval_wait_s()}s), 按拒绝自动解决: "
+             f"id={req.id} tool={req.tool_name} session={req.session}")
+    return False
 
 
 class WebPolicy:
@@ -160,7 +189,10 @@ class WebPolicy:
         self.sess.emit_threadsafe("permission_request",
                                   {"id": req.id, "tool": tool_name,
                                    "level": level, "preview": preview})
-        req.ev.wait()  # 阻塞引擎线程直到浏览器审批(本地单用户, 不设超时)
+        if not _wait_approval(req):
+            # 审批方无响应(掉线/未打开抽屉): 超时按拒绝, 记账后返回
+            storage.approval(self.sess.name, "tool", tool_name, "timeout")
+            return req
         storage.approval(self.sess.name, "tool", tool_name,
                          "allowed" if req.approved else "denied")
         if allow_always and req.always:
@@ -201,7 +233,9 @@ class WebPlanConfirmer:
                                   {"id": req.id, "plan": plan[:4000],
                                    # 计划确认=授权执行后续动作, 级别保守按 write
                                    "level": "write"})
-        req.ev.wait()
+        if not _wait_approval(req):
+            storage.approval(self.sess.name, "plan", "执行计划", "timeout")
+            return False, ""
         storage.approval(self.sess.name, "plan", "执行计划",
                          "allowed" if req.approved else "denied",
                          req.steer_text if req.approved else "")
@@ -227,8 +261,11 @@ class WebStepConfirmer:
                                    "text": step_text[:500],
                                    # 分步确认=授权继续执行, 同计划按 write
                                    "level": "write"})
-        req.ev.wait()
         import storage
+        if not _wait_approval(req):
+            storage.approval(self.sess.name, "step", f"步骤{i}/{n}",
+                             "timeout", "")
+            return "stop", ""
         storage.approval(self.sess.name, "step", f"步骤{i}/{n}",
                          "continue" if req.approved else "stop", req.steer_text)
         if req.approved:
@@ -407,7 +444,11 @@ def _sess_file(sid: str) -> Path:
 
 @app.get("/")
 async def index():
-    return FileResponse(core.HERE / "static" / "index.html")
+    # no-cache: 前端装配改过(如补元素/修脚本)后浏览器必须拿到新 HTML ——
+    # FileResponse 默认不发 Cache-Control, 浏览器 heuristic cache 会让用户
+    # 拿着旧版页面继续"点了没反应"(2026-10-13 实际故障的放大因素)。
+    return FileResponse(core.HERE / "static" / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/sessions")
@@ -556,6 +597,17 @@ async def chat(body: ChatBody, request: Request):
         except Exception as e:  # 引擎级异常兜底, 释放会话
             s.emit_threadsafe("fatal", {"message": f"{type(e).__name__}: {e}"})
         finally:
+            # 安全网: run_task 异常逃逸时它内部的 task_end 不会执行, DB 任务行
+            # 会永远停在 running(复盘统计虚高/健康检查失真)。_ctx.task_id 是线程
+            # 局部的: 正常收过尾的这里是 None(no-op), 异常逃逸的才补账。
+            try:
+                import storage
+                if storage.current_task_id() is not None:
+                    storage.task_end("error",
+                                     "[系统] 任务异常退出, 状态由服务端修正",
+                                     0, dict(s.client.usage))
+            except Exception:
+                pass
             s.running = False
             s.emit_threadsafe("running", {"value": False,
                                           "usage": dict(s.client.usage)})
