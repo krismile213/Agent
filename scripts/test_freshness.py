@@ -106,7 +106,7 @@ def test_part9_new_offline():
                     "当前负责人": owner}
 
         rows9 = [_row("G901", "审批中", today - pd.Timedelta(days=2), "张三"),
-                 _row("G902", "审批中", today - pd.Timedelta(days=30), "李四"),
+                 _row("G902", "审批中", today - pd.Timedelta(days=60), "李四"),
                  _row("G903", "已结束", today - pd.Timedelta(days=1), "王五")]
         pd.DataFrame(rows9).to_excel(
             d / "Part9_新品环节检查-20261008000000.xlsx", index=False)
@@ -119,13 +119,84 @@ def test_part9_new_offline():
         out = reg._tools["pipeline_alerts"].func(line="手机膜")
         check("Part9新单层存在", "Part9新单待办" in out)
         check("新单(2天)进Part9层", "G901" in out and "张三" in out)
-        check("悬挂旧单(30天)不进", "G902" not in out,
-              "Part9 旧单不得出现在任何信号层")
-        # G903(已结束/昨天创建)会进「本周新增SKU」层(口径=创建时间在本周, 不看状态),
+        check("悬挂旧单(60天)不进", "G902" not in out,
+              "Part9 旧单不得出现在任何信号层(60天已出近一月窗口)")
+        # G903(已结束/昨天创建)会进「最近一个月新增SKU」层(口径=创建时间在窗口内, 不看状态),
         # 但不得出现在 Part9 新单层
         seg9 = out.split("== Part9新单待办", 1)[1] if "Part9新单待办" in out else ""
         check("已结束单不进Part9层", "G903" not in seg9)
         check("声明数量=1单", "1单" in out.split("== Part9新单待办")[1][:40])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_new_sku_window_offline():
+    """「最近一个月新增SKU」窗口 + 签样追踪(2026-10-14 口径变更): 离线夹具, 不依赖真实数据.
+
+    决定性用例:
+      · 创建 20 天前 → 进(旧「本周」口径会漏掉); 创建 45 天前 → 不进(出 30 天窗口).
+      · 未签样且取数起 18 天 > 目标 12 天 → 该条标 ⚠️; 已签样 → 显示「签样 MM-DD」.
+    钉住单一真源常量, 防窗口/目标被悄悄改。
+    """
+    print("\n== 最近一个月新增SKU窗口+签样(离线夹具) ==")
+    import shutil
+    import pandas as pd
+    import agentcore as core
+    import plugins.workmain as wm
+    check("单一真源 NEW_SKU_WINDOW_DAYS=30", wm.NEW_SKU_WINDOW_DAYS == 30,
+          str(getattr(wm, "NEW_SKU_WINDOW_DAYS", None)))
+    check("签样目标 膜12/壳87", (wm.SIGN_TARGET_FILM, wm.SIGN_TARGET_SHELL) == (12, 87))
+    tmp = HERE / ".workbuddy" / "tmp_test_newsku"
+    d = tmp / "data" / "手机膜" / "手机膜"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        today = pd.Timestamp.now().normalize()
+        now_s = today.strftime("%Y-%m-%d %H:%M:%S")
+
+        def _p1(sku, created_days, qs_days):
+            return {"产品SKU": sku, "型号": f"{sku}-M", "审批状态": "审批中",
+                    "创建时间": (today - pd.Timedelta(days=created_days)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "更新时间": now_s,
+                    "手机数据取得日期": (today - pd.Timedelta(days=qs_days)).strftime("%Y-%m-%d"),
+                    "当前负责人": "测试"}
+
+        # G701: 窗口内 + 未签样(取数18天>目标12) → 必须进且标⚠️
+        # G702: 出窗口(45天) → 必须消失
+        # G703: 窗口内 + 已签样 → 显示签样日期
+        pd.DataFrame([_p1("G701", 20, 18), _p1("G702", 45, 43),
+                      _p1("G703", 15, 14)]).to_excel(
+            d / "Part1_产品开发-20261014000000.xlsx", index=False)
+
+        def _p2(sku, sign_days=None):
+            return {"新品SKU": sku, "型号": f"{sku}-M", "审批状态": "审批中",
+                    "创建时间": now_s, "更新时间": now_s,
+                    "全套样品测试完成时间": (
+                        (today - pd.Timedelta(days=sign_days)).strftime("%Y-%m-%d")
+                        if sign_days is not None else ""),
+                    "当前负责人": "测试"}
+
+        pd.DataFrame([_p2("G701"), _p2("G703", sign_days=10)]).to_excel(
+            d / "Part2_新品首单下单-20261014000000.xlsx", index=False)
+
+        reg = core.build_registry()
+        wm.register(reg, {"workmain_root": str(tmp)})
+        out = reg._tools["pipeline_alerts"].func(line="手机膜")
+        check("新层标题=最近一个月新增SKU", "== 最近一个月新增SKU" in out, out[:200])
+        sec = (out.split("== 最近一个月新增SKU", 1)[1].split("== 临期预警", 1)[0]
+               if "== 最近一个月新增SKU" in out else "")
+        n_rows = sum(1 for l in sec.splitlines() if l.startswith("  G7"))
+        title = sec.splitlines()[0] if sec else ""
+        check("声明 2 个(20天进/45天出/15天进)", "2个" in title and n_rows == 2,
+              f"标题={title}, 明细行={n_rows}")
+        check("窗口内20天单(G701)进层", "G701" in sec)
+        check("出窗口45天单(G702)不进层", "G702" not in sec,
+              "创建45天前已超一月窗口")
+        check("窗口内15天单(G703)进层", "G703" in sec)
+        l701 = next((l for l in sec.splitlines() if "G701" in l), "")
+        l703 = next((l for l in sec.splitlines() if "G703" in l), "")
+        check("未签样超目标标⚠️(G701)", "⚠️" in l701 and "未签样" in l701, l701)
+        check("已签样显示签样日期(G703)", "签样" in l703 and "未签样" not in l703, l703)
+        check("未签样汇总行存在", "未签样待跟进" in sec)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -235,6 +306,8 @@ def test_tools_real():
     out_pipe = reg._tools["pipeline_alerts"].func(line="手机膜")
     check("pipeline 含数据截至行", "数据截至" in out_pipe)
     check("pipeline 口径注仍在", "口径: 全流程线" in out_pipe)
+    check("pipeline 新增层=最近一个月(含签样追踪)", "最近一个月新增SKU" in out_pipe
+          and "含签样追踪" in out_pipe)
     check("pipeline Part9新单层存在", "Part9新单待办" in out_pipe)
     if "Part9新单待办" in out_pipe:
         import re as _re
@@ -318,6 +391,7 @@ def main():
     test_stale_note()
     test_latest_parts()
     test_part9_new_offline()
+    test_new_sku_window_offline()
     test_stale_cap_offline()
     test_sync_conclusion_offline()
     if not _skip_if_no_data():

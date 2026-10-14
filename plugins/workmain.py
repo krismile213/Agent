@@ -33,6 +33,18 @@ DEFAULT_ROOT = r"C:\Users\dell\Desktop\work-main"
 # 改此值请重跑 scripts/probe_stale_cap.py 量化翻转面; 运行时文案/docstring 均插值本常量。
 STALE_CAP_DAYS = 120
 
+# 口径单一真源: 「新增SKU」的观察窗口(天, 滚动) —— pipeline_alerts 的「新增」层用。
+# 2026-10-14 由「本周(周一起)」改为「最近一个月(今天往前30天)」: 周窗口只看 0~7 天太窄,
+# 漏掉近一月内新增却仍卡在签样/在途的 SKU。改此值即调窗口(例: 今天10-14 → 09-14~10-14)。
+NEW_SKU_WINDOW_DAYS = 30
+
+# 签样节点口径(单一真源, 与数据后台 seg_rules 对齐): 未签样且超过目标天数即标 ⚠️。
+#   手机膜: 取数(Part1 手机数据取得日期) → 签样, 目标 12 天(膜 SEGS「取数→签样」)。
+#   手机壳: 提案(Part1 创建时间) → 签样, 目标 87 天(壳无取数节点, 膜 75+12 名义合并)。
+# 判定锚点由数据驱动: info["start"] 有值(膜有取数列)走膜的锚点, 否则走壳的(创建时间)。
+SIGN_TARGET_FILM = 12
+SIGN_TARGET_SHELL = 87
+
 # 路线复盘两套口径 → 汇总xlsx文件 (口径语义: action=动作映射 / system=系统业务时间列)
 ROUTE_FILES = {
     "action": "route_路线复盘_复盘文件.xlsx",
@@ -72,6 +84,13 @@ def _latest_parts(d):
 def _part_label(stem: str) -> str:
     """'Part2_新品首单下单-20260928090829' → 'Part2 新品首单下单'."""
     return stem.split("-")[0].replace("_", " ")
+
+
+def _is_sign_col(name: str) -> bool:
+    """列名是否为「签样时间」类: 膜=Part2「全套样品测试完成时间」,
+    壳=Part1/2「三方确样时间」「手机壳确样日期/时间」等(与数据后台 NODES['签样'] 同源)."""
+    n = str(name)
+    return ("签样" in n) or ("确样" in n) or ("样品" in n and "完成" in n)
 
 
 def _stale_note(fresh_time, warn_days: int = 2) -> str:
@@ -390,7 +409,7 @@ def register(registry, cfg: dict) -> int:
 
     def t_pipeline_alerts(line: str = "手机膜", warn_days: int = 15,
                           top: int = 8) -> str:
-        f"""四层流程信号(权威表口径): 本周新增SKU / 全流程临期 / 已超期 / 环节停滞超目标.
+        f"""四层流程信号(权威表口径): 最近一个月新增SKU(含签样追踪) / 全流程临期 / 已超期 / 环节停滞超目标.
         全流程线: 空运60/海运69(时效确认规则表·口径说明); 启动日=Part1手机数据取得日期
         (缺省最早创建时间); 在途只看Part1~8; >{STALE_CAP_DAYS}天历史遗留不提醒; 段级为近似口径
         (环节内无进展超确认目标), 精确段口径以路线复盘为准."""
@@ -402,11 +421,11 @@ def register(registry, cfg: dict) -> int:
         if not files:
             return "[错误] 无Part文件"
         today = pd.Timestamp(datetime.now().strftime("%Y-%m-%d"))
-        monday = today - pd.Timedelta(days=today.weekday())
+        since = today - pd.Timedelta(days=NEW_SKU_WINDOW_DAYS)
         targets = _part_targets()
         modes = _sku_modes()
         FULL = {"air": 60, "sea": 69}
-        skus = {}   # sku -> {model, start, pending:set, created, last_up}
+        skus = {}   # sku -> {model, start, pending:set, created, last_up, sign}
         seg_rows = []  # (超目标天数, idle, sku, part, target)
         part9_new = []  # (创建时间, sku, model, owner) Part9新单待办: 创建≤7天且审批中
         fresh_time = None  # 全目录最新「更新时间」, 用于数据新鲜度硬判
@@ -427,6 +446,9 @@ def register(registry, cfg: dict) -> int:
                        if "创建时间" in df.columns else None)
             updated = (pd.to_datetime(df["更新时间"], errors="coerce")
                        if "更新时间" in df.columns else None)
+            sign_col = next((c for c in df.columns if _is_sign_col(str(c))), None)
+            signs = (pd.to_datetime(df[sign_col], errors="coerce")
+                     if sign_col else None)
             if updated is not None:
                 last = updated.max()
                 if pd.notna(last) and (fresh_time is None or last > fresh_time):
@@ -441,7 +463,7 @@ def register(registry, cfg: dict) -> int:
                     continue
                 info = skus.setdefault(sku, {"model": "", "start": None,
                                              "pending": set(), "created": None,
-                                             "last_up": None})
+                                             "last_up": None, "sign": None})
                 mv = str(r.get(model_col, "")).strip() if model_col else ""
                 if mv and mv.lower() != "nan" and not info["model"]:
                     info["model"] = mv
@@ -456,6 +478,11 @@ def register(registry, cfg: dict) -> int:
                 u = updated.iloc[i] if updated is not None else None
                 if u is not None and pd.notna(u) and (info["last_up"] is None or u > info["last_up"]):
                     info["last_up"] = u
+                if signs is not None:
+                    sg = signs.iloc[i]
+                    # 签样取最早一次(重复列/多轮确认时以首次签样为准)
+                    if sg is not None and pd.notna(sg) and (info["sign"] is None or sg < info["sign"]):
+                        info["sign"] = sg
                 if is_pending and part_no != "9":
                     info["pending"].add(part_no)
                     # 段级近似: 环节内无进展(最后更新)超该Part确认目标; Part8按运输方式
@@ -475,9 +502,9 @@ def register(registry, cfg: dict) -> int:
                             owner = ""
                         part9_new.append((c, sku, mv, owner))
 
-        new_week = sorted((info["created"], sku, info["model"])
+        new_skus = sorted((info["created"], sku, info["model"], info["sign"])
                           for sku, info in skus.items()
-                          if info["created"] is not None and info["created"] >= monday)
+                          if info["created"] is not None and info["created"] >= since)
         warn_list, over_list, legacy = [], [], 0
         for sku, info in skus.items():
             if not info["pending"]:
@@ -515,9 +542,26 @@ def register(registry, cfg: dict) -> int:
         if stale_warn:
             out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
         out.append(f"数据截至(最新更新时间): {str(fresh_time)[:16] if fresh_time is not None else '无'}")
-        out.append(f"\n== 本周新增SKU({monday:%m-%d}起, {len(new_week)}个) ==")
-        for c, sku, mv in new_week[:15]:
-            out.append(f"  {sku} {mv} (创建 {c:%m-%d})")
+        out.append(f"\n== 最近一个月新增SKU({since:%m-%d}~{today:%m-%d}, {len(new_skus)}个; 含签样追踪) ==")
+        wait_sign = []          # (未签样龄, sku) 供汇总
+        for c, sku, mv, sign in new_skus[:15]:
+            if sign is not None and pd.notna(sign):
+                out.append(f"  {sku} {mv} (创建 {c:%m-%d}, 签样 {sign:%m-%d})")
+                continue
+            # 未签样: 锚点=取数(膜有手机数据取得日期)/创建(缺取数列时, 壳亦如此);
+            # 目标 12 天(取数→签样)/87 天(提案→签样, 膜75+12名义值) —— 超目标标 ⚠️
+            info = skus[sku]
+            has_qs = info["start"] is not None
+            anchor = info["start"] if has_qs else c
+            tgt = SIGN_TARGET_FILM if has_qs else SIGN_TARGET_SHELL
+            age = int((today - anchor.normalize()).days)
+            flag = "⚠️" if age > tgt else ""
+            out.append(f"  {sku} {mv} (创建 {c:%m-%d}, {flag}未签样 {age}天/目标{tgt}天)")
+            wait_sign.append((age, sku))
+        if wait_sign:
+            wait_sign.sort(reverse=True)
+            out.append(f"  未签样待跟进 {len(wait_sign)} 个(锚点: 取数/目标12天·或创建/目标87天); "
+                       f"最久 {wait_sign[0][1]}({wait_sign[0][0]}天)")
         out.append(f"\n== 临期预警(剩≤{warn_days}天, {len(warn_list)}个) ==")
         for left, sku, mv, stuck, s, tag in warn_list[:n]:
             out.append(f"  {sku} {mv} 剩{left}天[{tag}] (启动{s:%m-%d}, 卡{stuck})")
@@ -599,7 +643,8 @@ def register(registry, cfg: dict) -> int:
          "required": []}, "read", t_scan_sync_data))
     registry.register(Tool(
         "pipeline_alerts",
-        "四层流程信号(权威表口径): 本周新增SKU / 全流程临期(空运60·海运69) / 已超期 / "
+        "四层流程信号(权威表口径): 最近一个月新增SKU(含签样追踪, 已签样给日期/未签样给"
+        "龄期并超目标标⚠️) / 全流程临期(空运60·海运69) / 已超期 / "
         "环节停滞超目标(近似段级). 目标值动态读 时效确认规则表.xlsx; "
         "每条带SKU/型号/卡点Part/剩余天数, 可直接用于催办. line默认手机膜.",
         {"type": "object", "properties": {
