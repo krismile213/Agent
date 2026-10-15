@@ -134,7 +134,7 @@ def test_new_sku_window_offline():
     """「最近一个月新增SKU」窗口 + 签样追踪(2026-10-14 口径变更): 离线夹具, 不依赖真实数据.
 
     决定性用例:
-      · 创建 20 天前 → 进(旧「本周」口径会漏掉); 创建 45 天前 → 不进(出 30 天窗口).
+      · 创建 20 天前 → 进(旧「本周」口径会漏掉); 创建 45 天前 → 不进(出 40 天窗口).
       · 未签样且取数起 18 天 > 目标 12 天 → 该条标 ⚠️; 已签样 → 显示「签样 MM-DD」.
     钉住单一真源常量, 防窗口/目标被悄悄改。
     """
@@ -143,7 +143,7 @@ def test_new_sku_window_offline():
     import pandas as pd
     import agentcore as core
     import plugins.workmain as wm
-    check("单一真源 NEW_SKU_WINDOW_DAYS=30", wm.NEW_SKU_WINDOW_DAYS == 30,
+    check("单一真源 NEW_SKU_WINDOW_DAYS=40", wm.NEW_SKU_WINDOW_DAYS == 40,
           str(getattr(wm, "NEW_SKU_WINDOW_DAYS", None)))
     check("签样目标 膜12/壳87", (wm.SIGN_TARGET_FILM, wm.SIGN_TARGET_SHELL) == (12, 87))
     tmp = HERE / ".workbuddy" / "tmp_test_newsku"
@@ -181,9 +181,9 @@ def test_new_sku_window_offline():
         reg = core.build_registry()
         wm.register(reg, {"workmain_root": str(tmp)})
         out = reg._tools["pipeline_alerts"].func(line="手机膜")
-        check("新层标题=最近一个月新增SKU", "== 最近一个月新增SKU" in out, out[:200])
-        sec = (out.split("== 最近一个月新增SKU", 1)[1].split("== 临期预警", 1)[0]
-               if "== 最近一个月新增SKU" in out else "")
+        check("新层标题=最近40天新增SKU", "== 最近40天新增SKU" in out, out[:200])
+        sec = (out.split("== 最近40天新增SKU", 1)[1].split("== 临期预警", 1)[0]
+               if "== 最近40天新增SKU" in out else "")
         n_rows = sum(1 for l in sec.splitlines() if l.startswith("  G7"))
         title = sec.splitlines()[0] if sec else ""
         check("声明 2 个(20天进/45天出/15天进)", "2个" in title and n_rows == 2,
@@ -196,7 +196,17 @@ def test_new_sku_window_offline():
         l703 = next((l for l in sec.splitlines() if "G703" in l), "")
         check("未签样超目标标⚠️(G701)", "⚠️" in l701 and "未签样" in l701, l701)
         check("已签样显示签样日期(G703)", "签样" in l703 and "未签样" not in l703, l703)
+        # 2026-10-15: 已签样改为追踪「当前环节 + 已持续 + 时效」(不再只给日期)
+        check("已签样带当前环节+时效(G703)", "现Part" in l703 and "时效" in l703, l703)
         check("未签样汇总行存在", "未签样待跟进" in sec)
+        # 2026-10-15: 临期/超期附「地区+货件号」的渲染(纯函数, 不依赖真实数据)
+        check("_ship_tag 渲染地区+货件号",
+              wm._ship_tag({"G9": [("亚马逊墨西哥", "FBA123")]}, "G9")
+              == " [到货: 亚马逊墨西哥 FBA123]")
+        check("_ship_tag 超限折叠为共N个",
+              "共4个" in wm._ship_tag({"G9": [("a", "1"), ("b", "2"),
+                                             ("c", "3"), ("d", "4")]}, "G9"))
+        check("_ship_tag 无记录为空串", wm._ship_tag({}, "G9") == "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -306,7 +316,7 @@ def test_tools_real():
     out_pipe = reg._tools["pipeline_alerts"].func(line="手机膜")
     check("pipeline 含数据截至行", "数据截至" in out_pipe)
     check("pipeline 口径注仍在", "口径: 全流程线" in out_pipe)
-    check("pipeline 新增层=最近一个月(含签样追踪)", "最近一个月新增SKU" in out_pipe
+    check("pipeline 新增层=最近40天(含签样追踪)", "最近40天新增SKU" in out_pipe
           and "含签样追踪" in out_pipe)
     check("pipeline Part9新单层存在", "Part9新单待办" in out_pipe)
     if "Part9新单待办" in out_pipe:

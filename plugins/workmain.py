@@ -35,8 +35,9 @@ STALE_CAP_DAYS = 120
 
 # 口径单一真源: 「新增SKU」的观察窗口(天, 滚动) —— pipeline_alerts 的「新增」层用。
 # 2026-10-14 由「本周(周一起)」改为「最近一个月(今天往前30天)」: 周窗口只看 0~7 天太窄,
-# 漏掉近一月内新增却仍卡在签样/在途的 SKU。改此值即调窗口(例: 今天10-14 → 09-14~10-14)。
-NEW_SKU_WINDOW_DAYS = 30
+# 漏掉近一月内新增却仍卡在签样/在途的 SKU。
+# 2026-10-15 由 30 扩到 40: 覆盖「取数→签样(膜12天)」+ 后续推进, 避免窗口边缘刚签样就掉出。
+NEW_SKU_WINDOW_DAYS = 40
 
 # 签样节点口径(单一真源, 与数据后台 seg_rules 对齐): 未签样且超过目标天数即标 ⚠️。
 #   手机膜: 取数(Part1 手机数据取得日期) → 签样, 目标 12 天(膜 SEGS「取数→签样」)。
@@ -134,6 +135,69 @@ def _latest_node(record, fallback_ts: str = "") -> str:
         who = f[0] or "?"
         return f"{who}「{f[1]}」{ts}"
     return items[-1][:50]
+
+
+def _part8_shipments(part_files) -> dict:
+    """Part8(到货)表 → {sku: [(到货渠道仓(地区), 货件号), ...]} 去重保序。
+
+    供 pipeline_alerts 给临期/超期条目标注「地区 + 货件号」。缺文件/缺列一律返回 {}。
+    """
+    import pandas as pd
+    f8 = next((f for f in part_files if f.stem.startswith("Part8")), None)
+    if f8 is None:
+        return {}
+    try:
+        df = pd.read_excel(f8, dtype=str)
+    except Exception:
+        return {}
+    cols = {str(c).strip(): c for c in df.columns}
+    sku_col = next((c for c in df.columns if "SKU" in str(c).upper()), None)
+    c_site, c_ship = cols.get("到货渠道仓"), cols.get("货件号")
+    if sku_col is None or (c_site is None and c_ship is None):
+        return {}
+    out: dict = {}
+    for _, r in df.iterrows():
+        sku = str(r.get(sku_col, "")).strip()
+        if not sku or sku.lower() == "nan":
+            continue
+        site = str(r.get(c_site, "")).strip() if c_site is not None else ""
+        no = str(r.get(c_ship, "")).strip() if c_ship is not None else ""
+        site = "" if site.lower() == "nan" else site
+        no = "" if no.lower() == "nan" else no
+        if not site and not no:
+            continue
+        pair = (site, no)
+        lst = out.setdefault(sku, [])
+        if pair not in lst:
+            lst.append(pair)
+    return out
+
+
+def _ship_tag(ship_map: dict, sku: str, limit: int = 3) -> str:
+    """把某 SKU 的 (地区, 货件号) 列表渲染成一行标注; 超过 limit 个折叠为「共N个」。"""
+    lst = ship_map.get(sku)
+    if not lst:
+        return ""
+    shown = "；".join(" ".join(p for p in pair if p) for pair in lst[:limit])
+    more = f" 共{len(lst)}个" if len(lst) > limit else ""
+    return f" [到货: {shown}{more}]"
+
+
+def _stage_of(info: dict, targets: dict, modes: dict, sku: str, today) -> str:
+    """已签样 SKU 的「最新状态」: 当前环节 + 已持续N天 + 时效M天; 无在途段则「已闭环」。"""
+    import pandas as pd
+    pend = info.get("pending") or set()
+    if not pend:
+        return "已闭环"
+    part = "Part" + max(pend)
+    tgt = targets.get(part, 1)
+    if part == "Part8" and modes.get(sku) == "sea":
+        tgt = 35
+    last = info.get("last_up")
+    if last is None or pd.isna(last):
+        return f"现{part} 时效{tgt}天"
+    days = int((today - last.normalize()).days)
+    return f"现{part} 已持续{days}天/时效{tgt}天"
 
 
 def register(registry, cfg: dict) -> int:
@@ -409,7 +473,9 @@ def register(registry, cfg: dict) -> int:
 
     def t_pipeline_alerts(line: str = "手机膜", warn_days: int = 15,
                           top: int = 8) -> str:
-        f"""四层流程信号(权威表口径): 最近一个月新增SKU(含签样追踪) / 全流程临期 / 已超期 / 环节停滞超目标.
+        f"""四层流程信号(权威表口径): 最近{NEW_SKU_WINDOW_DAYS}天新增SKU(含签样追踪: 已签样给
+        「签样日+当前环节/已持续/时效」, 未签样给龄期并超目标标⚠️) / 全流程临期 / 已超期 /
+        环节停滞超目标. 临期与超期条目附 Part8「到货渠道仓(地区)+货件号」.
         全流程线: 空运60/海运69(时效确认规则表·口径说明); 启动日=Part1手机数据取得日期
         (缺省最早创建时间); 在途只看Part1~8; >{STALE_CAP_DAYS}天历史遗留不提醒; 段级为近似口径
         (环节内无进展超确认目标), 精确段口径以路线复盘为准."""
@@ -424,6 +490,7 @@ def register(registry, cfg: dict) -> int:
         since = today - pd.Timedelta(days=NEW_SKU_WINDOW_DAYS)
         targets = _part_targets()
         modes = _sku_modes()
+        ship = _part8_shipments(files)   # sku -> [(到货渠道仓, 货件号)] 供临期/超期标注
         FULL = {"air": 60, "sea": 69}
         skus = {}   # sku -> {model, start, pending:set, created, last_up, sign}
         seg_rows = []  # (超目标天数, idle, sku, part, target)
@@ -542,11 +609,14 @@ def register(registry, cfg: dict) -> int:
         if stale_warn:
             out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
         out.append(f"数据截至(最新更新时间): {str(fresh_time)[:16] if fresh_time is not None else '无'}")
-        out.append(f"\n== 最近一个月新增SKU({since:%m-%d}~{today:%m-%d}, {len(new_skus)}个; 含签样追踪) ==")
+        out.append(f"\n== 最近{NEW_SKU_WINDOW_DAYS}天新增SKU({since:%m-%d}~{today:%m-%d}, "
+                   f"{len(new_skus)}个; 含签样追踪) ==")
         wait_sign = []          # (未签样龄, sku) 供汇总
         for c, sku, mv, sign in new_skus[:15]:
             if sign is not None and pd.notna(sign):
-                out.append(f"  {sku} {mv} (创建 {c:%m-%d}, 签样 {sign:%m-%d})")
+                # 已签样: 不再只给日期, 追踪「当前环节 + 已持续 + 时效」(用户 2026-10-15 要求)
+                st = _stage_of(skus[sku], targets, modes, sku, today)
+                out.append(f"  {sku} {mv} (创建 {c:%m-%d}, 签样 {sign:%m-%d}, {st})")
                 continue
             # 未签样: 锚点=取数(膜有手机数据取得日期)/创建(缺取数列时, 壳亦如此);
             # 目标 12 天(取数→签样)/87 天(提案→签样, 膜75+12名义值) —— 超目标标 ⚠️
@@ -564,10 +634,12 @@ def register(registry, cfg: dict) -> int:
                        f"最久 {wait_sign[0][1]}({wait_sign[0][0]}天)")
         out.append(f"\n== 临期预警(剩≤{warn_days}天, {len(warn_list)}个) ==")
         for left, sku, mv, stuck, s, tag in warn_list[:n]:
-            out.append(f"  {sku} {mv} 剩{left}天[{tag}] (启动{s:%m-%d}, 卡{stuck})")
+            out.append(f"  {sku} {mv} 剩{left}天[{tag}] (启动{s:%m-%d}, 卡{stuck})"
+                       + _ship_tag(ship, sku))
         out.append(f"\n== 已超期(超全流程线, {len(over_list)}个; 另历史遗留{legacy}个不列) ==")
         for over, sku, mv, stuck, s, tag in over_list[:n]:
-            out.append(f"  {sku} {mv} 已超{over}天[{tag}] (启动{s:%m-%d}, 卡{stuck})")
+            out.append(f"  {sku} {mv} 已超{over}天[{tag}] (启动{s:%m-%d}, 卡{stuck})"
+                       + _ship_tag(ship, sku))
         out.append(f"\n== 环节停滞超目标(段级口径: 距最后更新vs环节目标, {len(seg_rows)}单, 行级可重复) TOP ==")
         for over_t, idle, sku, part, tgt in seg_rows[:n]:
             out.append(f"  {sku} {part} 停滞{idle}天/目标{tgt}天 (超{over_t}天)")
@@ -601,6 +673,208 @@ def register(registry, cfg: dict) -> int:
             body = "\n".join(md.read_text("utf-8", errors="replace").splitlines()[-60:])
         return clip(f"exit={r.returncode}\n{r.stdout[-1500:]}\n{r.stderr[-800:]}"
                     f"\n== 单SKU报告尾部({md.name}) ==\n{body}", 6000)
+
+    # ---------- 事中日报(平台产物 xlsx, 本地只读) ----------
+
+    def t_inflight_report(line: str = "手机膜", date=None) -> str:
+        f"""读平台产物《事中日报》xlsx(数据后台系统每日 09:00 生成) → 结构化摘要。
+
+        纯本地 pandas 只读, 不依赖平台后端在线 → level=read, 无人值守晨/午报
+        注册表(build_readonly_registry 留 read 剔 write)自动保留, 可进定时链路。
+
+        输出: 在研SKU状态总表(状态/当前停留/已停留/目标/距超时/预警段/核心原因)
+              + 超期明细 + 风险预警 + 异常上报清单 + 豁免备查(SKU级, 不带原因原文)。
+        date 缺省读最新一份; 表头在第3行(row0=标题, row1=空), 与平台
+        reporting.py 写入结构一致。
+
+        口径(引用时必须注明来源): 环节名是**平台侧 segment**(如 素材加工→广告),
+        与 scan_sync_data / pipeline_alerts 的 **Part 编号**口径不是一套,
+        同一SKU的两个数字可能不一致; 当天上游未同步时日报数字会停在上一场。
+
+        脱敏纪律(与平台 API 对齐): xlsx 的「责任人」列是真实姓名, 而平台
+        outbound_guard 词典没有这一条、API 也从不返回该字段 —— 本工具只读所需列,
+        **从不读 责任人 / 豁免原因**, 自由文本(型号/核心原因)过手机号掩码。
+        甘特图是 227 列宽表, 不做文本化(看图去平台页面), 本工具不解析。
+        """
+        import pandas as pd
+        reports = (root / "data" / str(line) / str(line) / "reports").resolve()
+        try:
+            reports.relative_to(root.resolve())   # 防 line 参数路径逃逸
+        except ValueError:
+            return f"[错误] 非法品类名: {line!r} (仅支持 手机膜/手机壳)"
+        if not reports.is_dir():
+            return (f"[错误] 事中日报目录不存在: {reports}\n"
+                    "事中日报由数据后台系统每日 09:00 生成; 今天尚未生成时可用 "
+                    "date 指定更早日期, 或用 platform_daily_report 查已有清单。")
+        cands = sorted(reports.glob("事中日报_*.xlsx"))
+        if not cands:
+            return (f"[错误] {reports} 下没有 事中日报_*.xlsx"
+                    "(平台每日 09:00 生成; 上游未同步时会缺当天一份)")
+        if date not in (None, ""):
+            digits = re.sub(r"\D", "", str(date))
+            avail = ", ".join(p.stem.split("_")[-1] for p in cands[-8:])
+            if len(digits) != 8:
+                return (f"[错误] date 需为 YYYYMMDD 或 YYYY-MM-DD, 收到 {date!r}; "
+                        f"不传则读最新一份。已有(最近8份): {avail}")
+            hit = [p for p in cands if p.stem.endswith("_" + digits)]
+            if not hit:
+                return (f"[错误] 没有 {line} {digits[:4]}-{digits[4:6]}-{digits[6:]} "
+                        f"的事中日报。已有(最近8份): {avail}; 不传 date 读最新一份。")
+            f = hit[0]
+        else:
+            f = max(cands, key=lambda p: (p.stem.rsplit("_", 1)[-1], p.stat().st_mtime))
+
+        try:
+            xl = pd.ExcelFile(f)
+        except Exception as e:
+            return f"[错误] 打不开 {f.name}: {e} (文件可能正被 Excel/WPS 占用)"
+
+        def _sheet(sn):
+            """header=2: row0 标题 / row1 空 / row2 表头(平台写入结构, 勿改)。"""
+            try:
+                return pd.read_excel(xl, sheet_name=sn, header=2, dtype=str)
+            except Exception:
+                return None     # 旧版日报可能缺某张表 → 跳过该节, 不抛异常
+
+        def _rows(df):
+            """有效数据行: 丢全空行与「（无预警段）」一类占位行。"""
+            if df is None or df.empty:
+                return []
+            keep = []
+            for _, r in df.iterrows():
+                vals = [_s(v) for v in r.tolist()]
+                if any(vals) and not vals[0].startswith("（无"):
+                    keep.append(r)
+            return keep
+
+        def _num(v):
+            try:
+                return int(float(_s(v)))
+            except (TypeError, ValueError):
+                return -1
+
+        def _free(v):
+            """自由文本: 只过手机号掩码(_plat_sanitize 对 str 仅掩码, 不动业务内容)。"""
+            return _plat_sanitize(_s(v))
+
+        try:
+            t0 = pd.read_excel(xl, sheet_name=0, header=None, nrows=1, dtype=str)
+            title = _free(t0.iloc[0, 0])
+        except Exception:
+            title = ""
+        d8 = f.stem.rsplit("_", 1)[-1]
+        day = f"{d8[:4]}-{d8[4:6]}-{d8[6:]}" if len(d8) == 8 else d8
+        # 标题行(row0)自带「品类·日期·生成时间」; 缺标题才自拼(旧版日报可能没有)
+        out = [title or f"流程事中日报 · {line} · {day}",
+               f"来源: data/{line}/{line}/reports/{f.name} (平台每日09:00生成; "
+               "当天上游未同步则数字停在上一场)",
+               "口径注: 环节名为平台侧segment口径(如 素材加工→广告), 与 scan_sync_data/"
+               "pipeline_alerts 的Part编号口径不同, 同一SKU数字可能不一致, 引用请注明来源。"]
+
+        # ① 在研SKU状态总表 —— 超期优先, 同状态按已停留降序
+        rows = _rows(_sheet("在研SKU状态总表"))
+        if rows:
+            dist = {}
+            for r in rows:
+                k = _s(r.get("状态")) or "?"
+                dist[k] = dist.get(k, 0) + 1
+            rows.sort(key=lambda r: (0 if _s(r.get("状态")) == "超期" else 1,
+                                     -_num(r.get("已停留(天)"))))
+            out.append("")
+            out.append(f"— 在研状态总表 ({len(rows)} SKU: "
+                       + " / ".join(f"{k}{v}" for k, v in sorted(dist.items())) + ") —")
+            for r in rows[:30]:
+                sku = _s(r.get("SKU"))
+                model = _free(r.get("型号"))
+                mid = f" {model}" if model and model != sku else ""
+                seg = _s(r.get("当前停留环节")) or "?"
+                dept = _s(r.get("部门"))
+                tail = []
+                left = _s(r.get("距超时(天)"))
+                if left and left != "—":
+                    tail.append(f"距超时:{left}")
+                warn = _s(r.get("预警段数"))
+                if warn and warn != "0":
+                    tail.append(f"预警段{warn}")
+                multi = _s(r.get("多轮提交"))
+                if multi and multi != "—":
+                    tail.append(f"多轮:{multi}")
+                cause = _free(r.get("核心原因"))
+                if cause and cause != "—":
+                    tail.append(f"原因:{cause}")
+                out.append(f"  {sku}{mid} | {_s(r.get('状态')) or '?'} | "
+                           f"{seg}({dept}) 已{_s(r.get('已停留(天)'))}/"
+                           f"目标{_s(r.get('目标(天)'))}天"
+                           + (" | " + " | ".join(tail) if tail else ""))
+            if len(rows) > 30:
+                out.append(f"  …另有 {len(rows) - 30} 个SKU未列出"
+                           "(全量去平台「事中日报」页)")
+
+        # ② 超期明细
+        rows = _rows(_sheet("超期明细"))
+        if rows:
+            rows.sort(key=lambda r: -_num(r.get("超期(天)")))
+            out.append("")
+            out.append(f"— 超期明细 ({len(rows)} 段; 进行中且已进行>目标) —")
+            for r in rows[:15]:
+                out.append(f"  {_s(r.get('SKU'))} {_s(r.get('部门'))} "
+                           f"{_s(r.get('环节'))} 已进行{_s(r.get('已进行(天)'))}/"
+                           f"目标{_s(r.get('目标(天)'))}天 → "
+                           f"超期{_s(r.get('超期(天)'))}天")
+            if len(rows) > 15:
+                out.append(f"  …另有 {len(rows) - 15} 段")
+
+        # ③ 风险预警
+        rows = _rows(_sheet("风险预警"))
+        out.append("")
+        if rows:
+            rows.sort(key=lambda r: -_num(r.get("已进行(天)")))
+            out.append(f"— 风险预警 ({len(rows)} 段; 已进行>目标×预警系数, 未到目标) —")
+            for r in rows[:15]:
+                out.append(f"  {_s(r.get('SKU'))} {_s(r.get('部门'))} "
+                           f"{_s(r.get('环节'))} 已进行{_s(r.get('已进行(天)'))}/"
+                           f"目标{_s(r.get('目标(天)'))}天 "
+                           f"(预警线{_s(r.get('预警线(天)'))}天)")
+            if len(rows) > 15:
+                out.append(f"  …另有 {len(rows) - 15} 段")
+        else:
+            out.append("— 风险预警 (本次无预警段) —")
+
+        # ④ 异常上报清单
+        rows = _rows(_sheet("异常上报清单"))
+        if rows:
+            dist = {}
+            for r in rows:
+                k = _s(r.get("类型")) or "?"
+                dist[k] = dist.get(k, 0) + 1
+            rows.sort(key=lambda r: -_num(r.get("超期(天)")))
+            out.append("")
+            out.append(f"— 异常上报 ({len(rows)} 条: "
+                       + " / ".join(f"{k}{v}" for k, v in sorted(dist.items())) + ") —")
+            for r in rows[:15]:
+                out.append(f"  [{_s(r.get('类型'))}] {_s(r.get('SKU'))} "
+                           f"{_s(r.get('部门'))} {_s(r.get('环节'))} "
+                           f"已进行{_s(r.get('已进行(天)'))}天/"
+                           f"超期{_s(r.get('超期(天)'))}天")
+            if len(rows) > 15:
+                out.append(f"  …另有 {len(rows) - 15} 条")
+
+        # ⑤ 豁免备查 —— 只到 SKU 级(豁免类型); 「原因」列含登记人姓名, 与平台 API
+        #    一致不返回, 要看全量去平台页面。
+        rows = _rows(_sheet("豁免备查"))
+        out.append("")
+        if rows:
+            out.append(f"— 豁免备查 ({len(rows)} 个SKU已移出追踪) —")
+            for r in rows[:15]:
+                out.append(f"  {_s(r.get('SKU'))} {_free(r.get('型号'))} · "
+                           f"{_s(r.get('豁免类型'))}")
+            if len(rows) > 15:
+                out.append(f"  …另有 {len(rows) - 15} 个")
+            out.append("  (不返回「原因」原文: 该列含登记人姓名, 平台API同样不返回)")
+        else:
+            out.append("— 豁免备查 (无) —")
+
+        return clip("\n".join(out), 3800)
 
     # ---------- 注册 ----------
 
@@ -643,8 +917,9 @@ def register(registry, cfg: dict) -> int:
          "required": []}, "read", t_scan_sync_data))
     registry.register(Tool(
         "pipeline_alerts",
-        "四层流程信号(权威表口径): 最近一个月新增SKU(含签样追踪, 已签样给日期/未签样给"
-        "龄期并超目标标⚠️) / 全流程临期(空运60·海运69) / 已超期 / "
+        f"四层流程信号(权威表口径): 最近{NEW_SKU_WINDOW_DAYS}天新增SKU(含签样追踪, 已签样给"
+        "「签样日+当前环节/已持续/时效」/未签样给龄期并超目标标⚠️) / 全流程临期(空运60·海运69, "
+        "附到货地区+货件号) / 已超期(附到货地区+货件号) / "
         "环节停滞超目标(近似段级). 目标值动态读 时效确认规则表.xlsx; "
         "每条带SKU/型号/卡点Part/剩余天数, 可直接用于催办. line默认手机膜.",
         {"type": "object", "properties": {
@@ -652,6 +927,20 @@ def register(registry, cfg: dict) -> int:
             "warn_days": {"type": "integer", "minimum": 1, "description": "临期阈值天数, 默认15"},
             "top": {"type": "integer", "minimum": 1, "description": "每层列出条数, 默认8"}},
          "required": []}, "read", t_pipeline_alerts))
+    registry.register(Tool(
+        "inflight_report",
+        "读平台产物《事中日报》xlsx(每日09:00生成) → 结构化摘要: 在研SKU状态总表"
+        "(状态/当前停留/已停留/目标/距超时/预警段/核心原因) + 超期明细 + 风险预警 + "
+        "异常上报清单 + 豁免备查(SKU级)。纯本地pandas只读, 不依赖平台后端在线, "
+        "无人值守链路可用。口径为平台侧segment(如 素材加工→广告), 与 pipeline_alerts "
+        "的Part口径不同, 引用须注明来源; 责任人字段按脱敏纪律不返回。"
+        "line默认手机膜; date可传 YYYYMMDD/YYYY-MM-DD 读历史某天, 缺省读最新。",
+        {"type": "object", "properties": {
+            "line": {"type": "string", "enum": ["手机膜", "手机壳"],
+                     "description": "品类, 缺省手机膜"},
+            "date": {"type": "string",
+                     "description": "可选, YYYYMMDD 或 YYYY-MM-DD; 缺省读最新一份"}},
+         "required": []}, "read", t_inflight_report))
     registry.register(Tool(
         "run_route_check",
         "对指定SKU重跑路线复盘脚本并返回单SKU报告尾部(写级操作, 输出隔离到agent_tmp). "
@@ -661,7 +950,7 @@ def register(registry, cfg: dict) -> int:
             "caliber": {"type": "string", "enum": ["action", "system"]},
             "mode": {"type": "string", "enum": ["air", "sea"]}},
          "required": ["sku"]}, "write", t_run_route_check))
-    return 8 + _register_platform(registry, cfg)
+    return 9 + _register_platform(registry, cfg)
 
 
 # ---------- platform_* · 平台后端只读直连（「AI 助手嵌入」任务书 T06, 2026-10-09） ----------

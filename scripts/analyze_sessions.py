@@ -248,7 +248,8 @@ def render_markdown(db: dict, js: dict, findings: list, today: str) -> str:
         L.append(f"> ⚠️ {db.get('note', '数据库不可用')} — DB 侧各节为空。")
         L.append("")
     if js.get("files"):
-        L.append(f"- 数据窗口: {js['window'][0][:19]} ~ {js['window'][1][:19]}")
+        L.append(f"- 会话窗口(仅 sessions/*.jsonl, 不含 agent.db): "
+                 f"{js['window'][0][:19]} ~ {js['window'][1][:19]}")
     L.append(f"- 会话文件: {js.get('files', 0)} 个 | "
              f"任务: {sum(db.get('tasks', {}).get('by_status', {}).values()) or 0} | "
              f"LLM 调用: {db.get('llm_total', 0)} | 工具调用: {db.get('tool_total', 0)}")

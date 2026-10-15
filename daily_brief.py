@@ -85,7 +85,7 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
    (如"数据库锁定"等日志里没有的错误); "数据截至"反映的是审批内容最后更新时间,
    周末/节假日无审批时数据截至会自然停在上一场, 这不等于同步故障。
 2) 用 scan_sync_data 实时扫描: 状态分布 / 数据截至时间 / 今日有动态明细(含所在Part)。
-3) 用 pipeline_alerts 获取五层信号: 最近一个月新增SKU(滚动30天, 含签样追踪) /
+3) 用 pipeline_alerts 获取五层信号: 最近40天新增SKU(滚动40天, 含签样追踪) /
    全流程临期(空运60·海运69) / 已超期 / 环节停滞超目标(近似段级) / Part9新单待办(创建≤7天且审批中)。
 4) 用 read_file 读取 流程复盘/output/预警_加急SKU.md 的前40行(不存在就跳过),
    仅作背景补充 —— 必须注明它是旧批次产物, 与实时数据冲突时以实时为准。
@@ -94,18 +94,28 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
    "数据已N天未同步, ⑤的停滞天数含断供期偏大" 写在简报最顶部第一行, 再写其他内容;
    注意: 数据截至久未变≠同步故障, 故障与否只看 sync_status 的 [结论] 行)
 ② 今日动态(若 pipeline_alerts 的 Part9新单待办 层有单, 逐条带SKU与当前负责人列出)
-③ 最近一个月新增SKU(滚动30天, 编号+型号+创建日+签样状态: 已签样给"签样MM-DD", 未签样给
-   "未签样N天/目标M天"并把超目标(⚠️)的排在前面说明; 这一节对应 data/report 事中汇报表的签样追踪)
+③ 最近40天新增SKU(滚动40天, 编号+型号+创建日+签样状态: 已签样给"签样MM-DD + 当前环节/已持续/
+   时效"(直接抄工具给的"现PartX 已持续N天/时效M天"), 未签样给"未签样N天/目标M天"并把超目标(⚠️)
+   的排在前面说明; 这一节对应 data/report 事中汇报表的签样追踪)
 ④ 临期预警(按剩余天数升序, 带卡点与空运/海运口径) ⑤ 已超期与环节停滞TOP(带超标天数,
    并注明口径"段级停滞=距最后更新vs环节目标", 不要写成全流程耗时; scan_sync_data 与
    pipeline_alerts 的停滞口径不同, 同一SKU数字可能差1天以上, 引用时注明来源工具)
+   注: ④⑤ 条目若带 "[到货: 地区 货件号]" 标注(来源=Part8到货表的"到货渠道仓"+"货件号"),
+   必须原样带上——这就是加急催办要的"地区+货件号"(俗称"火箭"标记); 同批多站多货件照工具给的抄。
 ⑥ 行动建议(≤2条)。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。
 ② 今日动态必须逐条写清"哪条SKU/型号 · 在哪个Part(环节) · 审批状态 · 最新审批节点+操作人+时间 ·
 当前负责人", 直接抄工具给的明细, 不要只写编号; 工具没给节点明细就注明"仅字段更新"。"""
 
 
 def main():
-    sys.stdout.reconfigure(encoding="utf-8")
+    # 计划任务经 cmd >> task.log 重定向: 不 reconfigure 时 stdout 走 cp936。
+    # 只 reconfigure stdout 会让 traceback(走 stderr)仍是 GBK, 日志混编码成乱码,
+    # 故两个流一起改成 UTF-8(2026-10-15 修)。
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description="mini_agent 每日晨检简报")
     ap.add_argument("--push", action="store_true", help="若配置了钉钉webhook则推送")
     args = ap.parse_args()

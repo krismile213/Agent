@@ -1,8 +1,9 @@
 {
   "_说明": "复制本文件为 config.json 并填入你的大模型 API 信息(真实Key只放config.json, 它已被gitignore)。任何 OpenAI 兼容接口均可。环境变量 AGENT_API_KEY/AGENT_BASE_URL/AGENT_MODEL 优先于此文件。",
-  "base_url": "https://api.z.ai/api/coding/paas/v4",
+  "base_url": "https://api.z.ai/api/paas/v4",
   "api_key": "在这里填你的Key",
-  "model": "glm-5.3",
+  "model": "glm-4.7-flash",
+  "model_fallbacks": ["glm-4.5-flash"],
   "temperature": 0.2,
   "max_turns": 30,
   "context_budget_tokens": 48000,
@@ -21,7 +22,8 @@
     }
   ],
   "_常用对照": {
-    "z.ai coding plan(默认, 与ZCode同源)": "base_url=https://api.z.ai/api/coding/paas/v4  model=glm-5.3 或 glm-5.3-flash(更快更省); Key在 z.ai 控制台创建, 就是ZCode/Claude Code订阅用的那把",
+    "z.ai 标准端点(默认/推荐, 免费)": "base_url=https://api.z.ai/api/paas/v4  model=glm-4.7-flash 或 glm-4.5-flash(免费); Key在 z.ai 控制台创建。⚠️ 免费档限流(429/1302/1305)常见, 务必配 model_fallbacks 让重试自动换模型",
+    "z.ai coding 订阅端点(可选)": "base_url=https://api.z.ai/api/coding/paas/v4  model=glm-5.3 或 glm-5.3-flash; 与 ZCode 同一订阅。⚠️ 订阅过期会全线 429(code 1309), 届时改回标准端点",
     "智谱GLM(国内直连)": "base_url=https://open.bigmodel.cn/api/paas/v4  model=glm-4.7 或 glm-4.7-flash(免费)",
     "DeepSeek": "base_url=https://api.deepseek.com/v1  model=deepseek-chat",
     "其它OpenAI兼容": "base_url=厂商给的地址(一般以 /v1 结尾)  model=厂商模型名"

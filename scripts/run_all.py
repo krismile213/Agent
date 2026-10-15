@@ -6,7 +6,7 @@ scripts/run_all.py — 一键跑全部测试
 分层:
   --tier fast  (默认, 不耗token): selftest + 全部单测
   --tier full  (耗token, ~15分钟): fast + MCP双向 + Web冒烟 + 升级E2E +
-                                   高级能力E2E + 金标准评测(14用例)
+                                   高级能力E2E + 金标准评测(23用例)
 用法:
   python scripts/run_all.py            # 快速回归(秒级)
   python scripts/run_all.py --tier full
@@ -38,6 +38,7 @@ FAST = [
     ("登录鉴权+多用户", [sys.executable, "scripts/test_auth.py"]),
     ("平台上下文注入", [sys.executable, "scripts/test_plat_context.py"]),
     ("平台只读工具", [sys.executable, "scripts/test_platform_tools.py"]),
+    ("事中日报本地只读", [sys.executable, "scripts/test_inflight_report.py"]),
     ("Web渲染器", ["node", "scripts/test_web_md.js"]),
     ("企业化三件套单测", [sys.executable, "scripts/test_enterprise.py", "--unit-only"]),
     ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),

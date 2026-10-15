@@ -26,7 +26,7 @@ python mini_agent.py --session work --resume
 
 高级能力示例：`research` 工具让模型并行派出只读子agent分头调查（"用 research 并行查：A目录结构 + B文件里的X"）；计划模式把人的批准放在执行之前，适合影响面大的任务。
 
-默认配置指向 **z.ai coding plan**（与 ZCode 同一订阅）：`base_url=https://api.z.ai/api/coding/paas/v4`，当前 `model=glm-5.3-flash`（可换 `glm-5.3` 更强）。密钥可走环境变量 `AGENT_API_KEY` / `AGENT_BASE_URL` / `AGENT_MODEL`。
+默认配置指向 **z.ai 标准端点**：`base_url=https://api.z.ai/api/paas/v4`，当前 `model=glm-4.5-flash`（免费档，配 `model_fallbacks=["glm-4.7-flash"]` 在限流时自动换模型；可换 `glm-5.3` 更强）。若用 ZCode 同一订阅可改 coding 端点 `/coding/paas/v4`（⚠️ 订阅过期会全线 429，code 1309）。密钥可走环境变量 `AGENT_API_KEY` / `AGENT_BASE_URL` / `AGENT_MODEL`。
 
 ## Web 前端（多轮对话 + 人工干预）
 
@@ -45,6 +45,23 @@ python scripts/smoke_web.py
 **呈现层升级（2026-09-30）**：助手消息 **Markdown 渲染**（零依赖手写渲染器：标题/列表/表格/引用/围栏代码块，全程转义防 XSS，断言测试 `scripts/test_web_md.js`）；**工具调用折叠卡片**（状态点 运行中/成功/失败，失败自动展开）；**产物卡片 + 预览抽屉**（`write_file` 生成的文件自动出卡片，HTML/图片/CSV/Markdown/文本点开即右侧抽屉内联预览，走 `/api/files/raw`，同样的敏感/穿越拦截）；会话**重命名/删除**（`/api/sessions/{name}/rename`、`DELETE /api/sessions/{name}`，运行中拒绝）；**深浅主题**切换（localStorage 记忆）。
 
 架构：**一个引擎，多个前端** —— `agentcore.py`（事件回调驱动，前端无关）← CLI 适配器 `mini_agent.py`（input 确认） / Web 适配器 `server.py`（引擎跑工作线程，事件经 `call_soon_threadsafe` 推给 SSE；审批时引擎线程阻塞在 `threading.Event` 上等浏览器 POST `/api/approve`）。以后加钉钉机器人就是第三个适配器。
+
+### 平台后端依赖（platform_* 工具）
+
+`platform_*`（10 个平台只读工具）直连**数据后台系统**（平台后端），请求路径为 `{platform_root}/api/{path}`，默认 `http://127.0.0.1:8000`（改 `config.json` 的 `platform_root` 即可切地址）。它与 agent 服务是**两个独立进程**，平台嵌入场景下的启动顺序：
+
+1. **先起平台后端**（数据后台系统自身的 `start.py`）→ 监听 `127.0.0.1:8000`
+2. **再起 agent 服务**（本目录 `python server.py`）→ 监听 `127.0.0.1:8765`
+
+验证后端就绪（返回 JSON 即正常）：
+
+```powershell
+curl "http://127.0.0.1:8000/api/batches?category=手机膜"
+```
+
+**降级行为（重要）**：平台后端未起或挂掉时，`platform_*` 工具**不抛异常**，而是返回 `[平台接口不可用] ...` 文本（含「请确认平台后端已启动(数据后台系统 start.py)」提示），模型据此自愈——改用平台页面或提示稍后重试，**任务不中断**。因此 agent 服务可以先起、后端后补，只是这段窗口内平台类问答会拿到降级提示；`query_*` / `scan_*` / `pipeline_*`（读 xlsx 副本）不受影响，仍可用。
+
+> 注：平台调用内部强制 `trust_env=False` 绕开本机代理——沙箱注入的代理端口会把请求吞掉（同 `docs/DEPLOY` 的踩坑）。
 
 ## 核心机制（agentcore.py 引擎 + 两个适配器）
 
@@ -88,7 +105,7 @@ def register(registry, cfg):
 
 - 单个插件失败只打日志不影响内核（`--no-plugins` 可整体禁用）
 - 领域配置走 config.json（如 `workmain_root`）
-- 现有插件：**workmain**（6 个工具，见下表）
+- 现有插件：**workmain**（19 个工具 = 9 基础 + 10 平台）、**rag**（3 个工具）；加载后注册表共 **32** 个工具（内置 10 + RAG 3 + workmain 19）。
 
 ### workmain 插件工具清单
 
@@ -101,7 +118,27 @@ def register(registry, cfg):
 | `sync_status` | 读 | 钉钉同步定时任务最近日志（首行 `[结论]` 机器判定 ✅成功/❌失败/⏳进行中，防 LLM 脑补故障） |
 | `scan_sync_data` | 读 | **实时扫描自动同步目录**：状态分布/数据截至/今日动态SKU/停滞TOP（僵尸单据>120天单独计数，与 pipeline_alerts 封顶线统一，常量 `STALE_CAP_DAYS`），line 参数默认手机膜、可切手机壳 |
 | `pipeline_alerts` | 读 | **四层流程信号**（权威表口径）：**最近一个月新增SKU**（滚动30天，常量 `NEW_SKU_WINDOW_DAYS`；逐条带**签样追踪**——已签样给日期、未签样给龄期并超目标标 ⚠️，锚点=取数/目标12天 或 创建/目标87天）/ 全流程临期（**空运60·海运69**，运输模式取自路线总览）/ 已超期 / 环节停滞超目标（近似段级，目标值动态读《时效确认规则表.xlsx》，Part8 海运按 35 天）；每条带SKU/型号/卡点/剩余天数，可直接用于催办 |
+| `inflight_report` | 读 | **读平台产物《事中日报》xlsx**（数据后台系统每日 09:00 生成，`data/<品类>/<品类>/reports/`）→ 结构化摘要：在研SKU状态总表（状态/当前停留/已停留/目标/距超时/预警段/核心原因）+ 超期明细 + 风险预警 + 异常上报清单 + 豁免备查（SKU级）。**纯本地 pandas 只读，不依赖平台后端**，`level=read` → 无人值守晨/午报注册表自动保留；`date` 可传 `YYYYMMDD`/`YYYY-MM-DD` 读历史某天，缺省读最新。口径为**平台侧 segment**（如 `素材加工→广告`），与 `pipeline_alerts` 的 **Part 编号**口径不同，引用须注明来源；xlsx 的「责任人」列是真名、平台 API 从不返回，本工具只读所需列，**不返回责任人与豁免原因原文**（脱敏红线，见 `scripts/test_inflight_report.py`） |
 | `run_route_check` | **写** | 重跑单SKU路线复盘（输出隔离到 agent_tmp，不覆盖正式汇总） |
+
+### platform 工具清单（10 个，直连平台后端）
+
+> 对接「AI 助手嵌入」项目：直连平台后端（config 的 `platform_root`，默认 `http://127.0.0.1:8000`）取**唯一真源**，全部**只读**，不调平台的生成(POST)/下载接口。动态上下文（当前页/批次/品类）由平台 BFF 每轮经 **`X-Plat-Context`** 请求头注入，静态业务知识在 `AGENT.md`（分工：静态知识落文件、动态上下文走请求头）。返回前经 `_plat_sanitize` 脱敏（负责人姓名/手机号等不出）。
+
+| 工具 | 级别 | 说明 |
+|---|---|---|
+| `platform_batches` | 读 | 列出平台当前品类所有数据批次 |
+| `platform_overview` | 读 | 某批次平台总览 KPI（单量/时效/异常概览） |
+| `platform_sku_route` | 读 | 某 SKU 平台路线达标/复盘（action/system 双口径，各 Part 实际vs目标、卡点） |
+| `platform_alerts` | 读 | 平台加急预警明细（P0/P1/P2 + 盯数清单 + 数据新鲜度） |
+| `platform_transport` | 读 | 平台货件运输看板（逐票判定 + 渠道/运输方式聚合） |
+| `platform_records` | 读 | 平台明细分页查询（按批次+Part，可按审批号/状态/关键词过滤，脱敏） |
+| `platform_inflight_overview` | 读 | 平台事中总览（在研 SKU 清单 + KPI） |
+| `platform_inflight_alerts` | 读 | 平台事中风险预警（当日新超期/持续超期/临近超期 85%） |
+| `platform_daily_report` | 读 | 列出平台已生成的事中日报（只读，不生成不下载） |
+| `platform_deltas` | 读 | 平台单据增量（未闭环 SKU 新增单据追踪） |
+
+> 口径纪律：涉及平台真实数据一律走 `platform_*`（唯一真源）；`query_*` / `scan_*` / `pipeline_*` 读的是 xlsx 副本，仅在平台后端不可用且用户明确要求时降级使用，并注明数据来源与"可能与平台页面有口径差"（详见 `AGENT.md`）。
 
 ## 权限与沙箱
 
@@ -117,14 +154,14 @@ python scripts/run_all.py --tier full --skip mcp,eval
 
 > 第一行=快速层（秒级：selftest+单测+RAG检索质量）；`--tier full` 全量（含 MCP 双向+Web 冒烟+各 E2E+金标准评测，约 15 分钟）；`--skip mcp,eval` 按需跳过。
 
-三层结构：**①自动化套件**（run_all 调度：selftest / test_reflect_fix / test_upgrade / test_advanced / test_rag / test_files / test_safety / test_mcp / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，23 用例 = 机制回归 16 + 能力套件 ability 7——对账找差/防幻觉/严格JSON/跨源冲突裁决/裸算力/多文件统计/精确格式，全部断言式判定带标准答案）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，约 70 条）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
+三层结构：**①自动化套件**（`run_all.py` 调度；fast 层 19 个套件：selftest / test_reflect_fix / test_upgrade / test_advanced / test_security / test_human_intervention / test_research_guard / test_freshness / test_session_analysis / test_brief_guard / test_web_features / test_web_ui.js / test_memory_ckpt / test_auth / test_plat_context / test_platform_tools / test_web_md.js / test_enterprise / test_rag；full 层追加：test_files / test_safety / 各 E2E / smoke_web / run_eval）；**②金标准评测**（`eval/run_eval.py`，23 用例 = 机制回归 16 + 能力套件 ability 7——对账找差/防幻觉/严格JSON/跨源冲突裁决/裸算力/多文件统计/精确格式，全部断言式判定带标准答案）；**③手动用例清单**（[tests/TESTCASES.md](tests/TESTCASES.md)，约 70 条）。**约定：改动合入前 fast 层必须全绿；引擎行为改动加跑 full。**
 
 ## MCP 双向接入（工具生态）
 
-**方向一：把自己的工具暴露成 MCP server**（`mcp_server.py`，手写 stdio JSON-RPC 协议子集，零新依赖）——ZCode / Claude Code 等任何 MCP 客户端可直接调用全部 20 个工具（内置 9 含 external 级 dingtalk_send + RAG 3 + workmain 8）。接入示例（客户端侧 mcp 配置）：
+**方向一：把自己的工具暴露成 MCP server**（`mcp_server.py`，手写 stdio JSON-RPC 协议子集，零新依赖）——ZCode / Claude Code 等任何 MCP 客户端可直接调用注册表**全量工具**（当前配置下实测 32 个 = 内置 10 含 external 级 dingtalk_send + RAG 3 + workmain 19；`tools/list` 动态返回 `reg._tools` 全量，随插件配置变化）。接入示例（客户端侧 mcp 配置）：
 
 ```json
-{"mini-agent": {"command": "python", "args": ["C:\\Users\\dell\\Agent\\mcp_server.py"]}}
+{"mini-agent": {"command": "python", "args": ["C:\\Users\\dell\\Desktop\\Agent\\mcp_server.py"]}}
 ```
 
 注意：文件工具的沙箱根 = server 进程的工作目录（跟随客户端启动时的 cwd）；写级工具经外部客户端调用时，权限确认由客户端侧负责。
@@ -184,8 +221,8 @@ push/PR 到 master 自动跑：**快速层测试**（离线，跳过依赖本地
 3. **人工干预增强**：~~任务停止/转向~~ ✅；~~计划审批~~ ✅ 已随计划模式交付；~~批量审批~~ ✅（Web 审批卡片可堆叠 + 一键全部允许/拒绝，`/api/approve_batch`；刷新后经 `/api/pending` 重建未决卡片）；~~外发双确认~~ ✅（新增 `external` 工具级——草稿确认→发送确认两段审批、不吃"本会话总允许"，配套 `dingtalk_send` 工具（dry_run 可验配置），无人值守注册表自动摘除 external 级）；~~任务中途追加指令~~ ✅（任务运行中直接输入即追加：`InstructionInbox` 在轮/工具边界注入历史，`/api/enqueue`，不打断执行）
 4. **reflection 例行化**：~~反思结论落库~~ ✅ 已升级为闭环（`reflect_and_fix`：反思发现具体问题 → 带工具自动修正一轮，有界不递归）；~~金标准评测集回归~~ ✅ 已交付（`eval/run_eval.py`，机制回归 16 用例 + 能力套件 7 用例）；~~失败模式统计~~ ✅ 已交付（`scripts/analyze_sessions.py`：聚合 agent.db 四表 + sessions/*.jsonl，按规则自动推导行动建议——幻觉工具名/路径误用/限流重试率/空结果任务/审批拒绝率，产物落 `analysis/`；单测 41 项入 fast 层）
 5. **工具生态**：~~插件 API → MCP 化（同一函数两种暴露）~~ ✅ 已交付（`mcp_server.py` 手写协议双向暴露 + `mcp_bridge.py` 接入外部 server，测试 9/9）；"工具市场"待做
-7. **多agent协作**：~~子agent扇出~~ ✅ + ~~计划模式~~ ✅ + ~~专属角色子agent(角色/工具白名单)~~ ✅ + ~~结果自动核查(verify核查员)~~ ✅ + ~~计划分步执行与中途转向~~ ✅；待做：Web 端步骤级文本修改指令、子agent间协作(结果互引)
-6. **治理**：用量/成本预算、审计报表、多用户 RBAC；钉钉**入站机器人**（第三前端，Stream 模式收消息）待企业应用开通消息权限后接入——出站推送与定时晨检已交付（见上节）
+6. **多agent协作**：~~子agent扇出~~ ✅ + ~~计划模式~~ ✅ + ~~专属角色子agent(角色/工具白名单)~~ ✅ + ~~结果自动核查(verify核查员)~~ ✅ + ~~计划分步执行与中途转向~~ ✅；待做：Web 端步骤级文本修改指令、子agent间协作(结果互引)
+7. **治理**：用量/成本预算、审计报表、多用户 RBAC；钉钉**入站机器人**（第三前端，Stream 模式收消息）待企业应用开通消息权限后接入——出站推送与定时晨检已交付（见上节）
 
 ## 学习练习建议
 
