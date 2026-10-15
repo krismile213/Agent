@@ -20,6 +20,7 @@ DingTalkApprovalSync 的 09:00 / 14:30 之后). 本机 schtasks.exe 被安全策
 """
 
 import argparse
+import re
 import sys
 import time
 from datetime import datetime
@@ -53,7 +54,8 @@ def ensure_brief_answer(client, history: list, answer: str,
            and not history[-1].get("tool_calls")):
         history.pop()  # 空流残留, 留着会误导续生成
     hint = ("工具调用已全部完成。请基于以上工具输出直接输出中文markdown简报"
-            "(280~480字, 按任务要求的六节结构), 不要再调用任何工具, 不要输出其他内容。")
+            "(约500~1000字, 按任务要求的六节结构; 每个条目独占一行、行首 \"• \"), "
+            "不要再调用任何工具, 不要输出其他内容。")
     for wait_s in sleeps:
         sleep_fn(wait_s)  # 给限流桶留恢复时间, 立刻重试大概率还是 429
         msgs = history + [{"role": "user", "content": hint}]
@@ -65,6 +67,74 @@ def ensure_brief_answer(client, history: list, answer: str,
         if len(a) >= min_len:
             return a
     return (answer or "").strip()
+
+
+# ---------- 简报格式兜底(2026-10-15 用户反馈"③④ 挤成一坨看不清") ----------
+# 根因是 markdown 语义: **连续普通行会被折叠成一个段落**, 不带列表标记的逐行 SKU
+# 条目在钉钉/Web 上一渲染就并成一列。光靠提示词不够可靠(模型经常忘), 故加确定性兜底。
+_SKU_G = r"G\d{3,4}"
+_SKU_HEAD = re.compile(r"^%s\s" % _SKU_G)                      # 行首就是 SKU 条目
+_SPLIT_BY_SPACE = re.compile(r"\s+(?=%s\s)" % _SKU_G)          # "G598 … G599 …" 空格串行
+_SPLIT_BY_SEMI = re.compile(r"[；;]\s*(?=%s\s)" % _SKU_G)      # "G493 …；G550 …" 分号串行
+_COLON_THEN_SKU = re.compile(r"[:：]\s*(?=%s\s)" % _SKU_G)     # "**已超期**（17个）：G584 …"
+_TITLE_DUP = re.compile(r"^\s*#{0,3}\s*(?:晨检|午后)简报\b")
+_LISTED = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+|#{1,6}\s|>)")
+
+
+def _split_sku_entries(s: str) -> list:
+    """一行里被空格/分号串起来的多个 SKU 条目拆开, 保留原文文字不动。"""
+    parts = [s]
+    for pat in (_SPLIT_BY_SPACE, _SPLIT_BY_SEMI):
+        nxt = []
+        for p in parts:
+            nxt.extend(pat.split(p))
+        parts = nxt
+    return [p.strip() for p in parts if p.strip()]
+
+
+def normalize_brief_md(answer: str) -> str:
+    """把简报正文规范成"列表可渲染"的形态(只动结构, 不改任何文字):
+
+    1) 丢掉 LLM 多写的大标题行 —— 外层代码已写 "# {tag} {date}", 会重复;
+    2) 行首是 SKU 的裸条目 → 前置 "• "(一行一条);
+    3) 一行里被空格/分号串起来的多个条目 → 按条目边界拆行;
+    4) "组标签：Gxxx …" → 拆成 标签行 + "• Gxxx …" 条目行;
+    5) "- / * / 1. " 等列表标记统一成 "• ", 全文观感一致。
+    已经是标题/引用/普通句的行原样保留。
+    """
+    if not answer:
+        return answer
+    out: list = []
+    for raw in str(answer).replace("\r\n", "\n").split("\n"):
+        line = raw.rstrip()
+        s = line.strip()
+        if _TITLE_DUP.match(s):
+            continue                                  # 大标题去重
+        if not s:
+            out.append(line)
+            continue
+        if _LISTED.match(s):                          # 已有列表/标题/引用 → 统一 bullet
+            if re.match(r"^\s*[-*]\s+", s):
+                out.append("• " + s.lstrip("-*").strip())
+            elif re.match(r"^\s*\d+[.)]\s+", s):
+                out.append("• " + re.sub(r"^\s*\d+[.)]\s+", "", s))
+            else:
+                # 小节标题前补一个空行(源码可读, 渲染也更稳)
+                if re.match(r"^#{1,6}\s", s) and out and out[-1].strip():
+                    out.append("")
+                out.append(line)
+            continue
+        # 组标签和首条目挤在一行 → 先掰开(标签单独成行时尾冒号就没意义了, 去掉)
+        m = _COLON_THEN_SKU.search(s)
+        if m and _SKU_HEAD.match(s[m.end():]):
+            out.append(s[:m.start() + 1].rstrip().rstrip(":："))
+            s = s[m.end():].strip()
+        if _SKU_HEAD.match(s):                        # 裸 SKU 条目(可能被串行)
+            for it in _split_sku_entries(s):
+                out.append("• " + it)
+            continue
+        out.append(line)
+    return "\n".join(out).strip() + "\n"
 
 
 def build_readonly_registry(cfg: dict) -> core.Registry:
@@ -89,22 +159,35 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
    全流程临期(空运60·海运69) / 已超期 / 环节停滞超目标(近似段级) / Part9新单待办(创建≤7天且审批中)。
 4) 用 read_file 读取 流程复盘/output/预警_加急SKU.md 的前40行(不存在就跳过),
    仅作背景补充 —— 必须注明它是旧批次产物, 与实时数据冲突时以实时为准。
-输出中文markdown简报(280~480字, 首行标题写"{tag} {date}"), 分六节:
+输出中文markdown简报(约500~1000字)。大标题("## 午后简报 2026-10-15"这种)由外层
+代码统一加, **你不要再写大标题行, 否则会重复**; 但六节的小节标题("## ① 同步状态与数据截至"
+这种)要保留, 且序号与名称按下述原文照抄。
+
+**格式铁律(最重要, 违反即返工):**
+- ③④⑤⑥ 各节内**每个条目独占一行, 行首统一 "• "**(半角点+空格);
+- **严禁**把多个条目用空格/分号/顿号挤进同一行 —— 宁可整篇字数超标, 也不许并成一列;
+- 条目必须换行分隔, 一行一个 SKU, 结尾不要加分号; 上一行的括号/方括号要闭合再换行;
+- ② 也按同样格式(每个动态一条 "• ");
+- ⑤ 含两组时, "已超期" 与 "环节停滞TOP" 各自单独成组, 组内仍逐条 "• ";
+- ⑥ 行动建议逐条 "• "(≤3条), 同样一行一条。
+
 ① 同步状态与数据截至(若任一工具输出带 ⚠️ 数据过旧/同步停摆告警, 必须把
-   "数据已N天未同步, ⑤的停滞天数含断供期偏大" 写在简报最顶部第一行, 再写其他内容;
+   "数据已N天未同步, ⑤的停滞天数含断供期偏大" 写在最顶部第一行, 再写其他内容;
    注意: 数据截至久未变≠同步故障, 故障与否只看 sync_status 的 [结论] 行)
-② 今日动态(若 pipeline_alerts 的 Part9新单待办 层有单, 逐条带SKU与当前负责人列出)
+② 今日动态(若 pipeline_alerts 的 Part9新单待办 层有单, 逐条带SKU与当前负责人列出;
+   必须逐条写清"哪条SKU/型号 · 在哪个Part(环节) · 审批状态 · 最新审批节点+操作人+时间 ·
+   当前负责人", 直接抄工具给的明细, 不要只写编号; 工具没给节点明细就注明"仅字段更新")
 ③ 最近40天新增SKU(滚动40天, 编号+型号+创建日+签样状态: 已签样给"签样MM-DD + 当前环节/已持续/
    时效"(直接抄工具给的"现PartX 已持续N天/时效M天"), 未签样给"未签样N天/目标M天"并把超目标(⚠️)
-   的排在前面说明; 这一节对应 data/report 事中汇报表的签样追踪)
-④ 临期预警(按剩余天数升序, 带卡点与空运/海运口径) ⑤ 已超期与环节停滞TOP(带超标天数,
-   并注明口径"段级停滞=距最后更新vs环节目标", 不要写成全流程耗时; scan_sync_data 与
-   pipeline_alerts 的停滞口径不同, 同一SKU数字可能差1天以上, 引用时注明来源工具)
+   的排在前面、其余按龄期降序; 这一节对应 data/report 事中汇报表的签样追踪)
+④ 临期预警(按剩余天数升序, 带卡点与空运/海运口径)
+⑤ 已超期与环节停滞TOP(带超标天数, 并注明口径"段级停滞=距最后更新vs环节目标",
+   不要写成全流程耗时; scan_sync_data 与 pipeline_alerts 的停滞口径不同,
+   同一SKU数字可能差1天以上, 引用时注明来源工具)
    注: ④⑤ 条目若带 "[到货: 地区 货件号]" 标注(来源=Part8到货表的"到货渠道仓"+"货件号"),
-   必须原样带上——这就是加急催办要的"地区+货件号"(俗称"火箭"标记); 同批多站多货件照工具给的抄。
-⑥ 行动建议(≤2条)。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。
-② 今日动态必须逐条写清"哪条SKU/型号 · 在哪个Part(环节) · 审批状态 · 最新审批节点+操作人+时间 ·
-当前负责人", 直接抄工具给的明细, 不要只写编号; 工具没给节点明细就注明"仅字段更新"。"""
+   必须**逐字符原样照抄**(货件号/地区名一个字符都不能改, 不得改写、合并、缩写或插入
+   任何字)——这就是加急催办要的"地区+货件号"(俗称"火箭"标记); 同批多站多货件照工具给的抄。
+⑥ 行动建议(≤3条)。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。"""
 
 
 def main():
@@ -147,6 +230,7 @@ def main():
     transcript.close()
 
     answer = ensure_brief_answer(client, history, answer)
+    answer = normalize_brief_md(answer)
 
     brief_dir = HERE / "briefs"
     brief_dir.mkdir(exist_ok=True)
