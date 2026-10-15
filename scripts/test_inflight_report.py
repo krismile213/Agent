@@ -113,6 +113,22 @@ def test_real():
     check("真实: 来源行带文件名", "事中日报_20261015.xlsx" in out)
     check("真实: 长度受 clip 控制", len(out) <= 3800, extra=str(len(out)))
 
+    # 人工登记（2026-10-15）：跨日期延续的在研备注，真源在生成器之外的
+    # 资产文件\事中日报人工登记.xlsx。工具必须把它带给模型（催办前必读的业务决策）。
+    try:
+        import pandas as pd
+        _ov = pd.read_excel(f, sheet_name="在研SKU状态总表", header=2, dtype=str)
+    except ImportError:
+        _ov = None
+    if _ov is not None and "人工登记" in _ov.columns:
+        note_map = {str(r["SKU"]).strip(): str(r["人工登记"]).strip()
+                    for _, r in _ov.iterrows()
+                    if str(r.get("人工登记") or "").strip()
+                    not in ("", "nan", "None")}
+        placed = [f"人工登记:{v}" for v in note_map.values() if f"人工登记:{v}" in out]
+        check("人工登记: 备注按SKU带入输出", len(placed) == len(note_map),
+              extra=f"notes={note_map} placed={placed}")
+
     # —— 脱敏硬校验: 拿 xlsx 里的真名/原文回来比对, 一个都不许出现 ——
     try:
         import pandas as pd

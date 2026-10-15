@@ -802,6 +802,12 @@ def register(registry, cfg: dict) -> int:
                 cause = _free(r.get("核心原因"))
                 if cause and cause != "—":
                     tail.append(f"原因:{cause}")
+                # 人工登记（2026-10-15）：跟着日期走的在研备注（真源=
+                # 资产文件\事中日报人工登记.xlsx）。「暂时不弄了」这类是催办前必读的
+                # 业务决策，必须带给模型 —— 但它会影响"要不要催"的判断。
+                note = _free(r.get("人工登记"))
+                if note:
+                    tail.append(f"人工登记:{note}")
                 out.append(f"  {sku}{mid} | {_s(r.get('状态')) or '?'} | "
                            f"{seg}({dept}) 已{_s(r.get('已停留(天)'))}/"
                            f"目标{_s(r.get('目标(天)'))}天"
@@ -930,11 +936,12 @@ def register(registry, cfg: dict) -> int:
     registry.register(Tool(
         "inflight_report",
         "读平台产物《事中日报》xlsx(每日09:00生成) → 结构化摘要: 在研SKU状态总表"
-        "(状态/当前停留/已停留/目标/距超时/预警段/核心原因) + 超期明细 + 风险预警 + "
+        "(状态/当前停留/已停留/目标/距超时/预警段/核心原因/人工登记) + 超期明细 + 风险预警 + "
         "异常上报清单 + 豁免备查(SKU级)。纯本地pandas只读, 不依赖平台后端在线, "
         "无人值守链路可用。口径为平台侧segment(如 素材加工→广告), 与 pipeline_alerts "
         "的Part口径不同, 引用须注明来源; 责任人字段按脱敏纪律不返回。"
-        "line默认手机膜; date可传 YYYYMMDD/YYYY-MM-DD 读历史某天, 缺省读最新。",
+        "「人工登记」是跨日期延续的在研备注(如'暂时不弄了'), 催办前必读, 优先级高于"
+        "系统算出的超期天数。line默认手机膜; date可传 YYYYMMDD/YYYY-MM-DD 读历史某天, 缺省读最新。",
         {"type": "object", "properties": {
             "line": {"type": "string", "enum": ["手机膜", "手机壳"],
                      "description": "品类, 缺省手机膜"},
