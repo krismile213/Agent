@@ -12,6 +12,7 @@ scripts/test_inflight_report.py — inflight_report(事中日报本地只读) �
 平台 API 也从不返回该字段, 所以本工具只读所需列, 这里用硬断言钉死。
 """
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -110,7 +111,9 @@ def test_real():
     for sec in ("在研状态总表", "超期明细", "风险预警", "异常上报", "豁免备查"):
         check(f"真实: 含「{sec}」节", f"— {sec}" in out or sec in out)
     check("真实: 口径注必现(引用须注明来源)", "口径注" in out and "Part" in out)
-    check("真实: 来源行带文件名", "事中日报_20261015.xlsx" in out)
+    # 工具默认取"最新一份"日报, 断言不能写死某天的文件名(2026-10-19 修:
+    # 原来断言 事中日报_20261015.xlsx, 日报推进到 1019 后必挂)
+    check("真实: 来源行带文件名", re.search(r"事中日报_\d{8}\.xlsx", out) is not None)
     check("真实: 长度受 clip 控制", len(out) <= 3800, extra=str(len(out)))
 
     # 人工登记（2026-10-15）：跨日期延续的在研备注，真源在生成器之外的
