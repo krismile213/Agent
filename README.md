@@ -184,7 +184,7 @@ python dingtalk_push.py --title "测试" --text "hello" --dry
 
 - **无人值守安全**：晨检用只读注册表（写级工具全部摘除），挂计划任务也零副作用
 - **空简报防线（2026-10-10 事故后加）**：免费档限流（429/1305 过载）会把 LLM 流式响应掐空——HTTP 200 建连但一个字没吐。两层防护：① `agentcore` 的 chat/chat_stream 检测"空响应/空流"（无 content 且无 tool_calls）自动进重试链换模型；② `daily_brief` 对正文不足 100 字的简报基于已收集的工具输出退避重生成（20s/40s 两次），仍短则**只落盘不推送**并以退出码 1 结束（宁可缺一期简报，不发空壳占位；`Get-ScheduledTaskInfo` 的 LastTaskResult 非 0 可见）。单测 `scripts/test_brief_guard.py`（16 项，已入 fast 层）
-- **计划任务（已注册，2026-10-19 核对实际触发）**：`\AgentDailyBrief` 每日 **09:00**、`\AgentDailyBriefPM` 每日 **14:10**，动作都是 `C:\Users\dell\Desktop\Agent\run_brief.bat`（内部探测能 import pandas+requests 的解释器，跑 `daily_brief.py --push`，输出追加到 `briefs/task.log`）。**一天只产出一份文档**：12 点前写 `briefs/<日期>.md` 的「晨检」段（完整六节快照）；12 点后以当天晨检段为基线，**只生成相对晨检的变化**，追加「午后更新」段（重跑替换该段，不会再多出一份 `_pm.md`）。两轮都排在同步任务 `\DingTalkApprovalSync` 之后。
+- **计划任务（已注册，2026-10-19 核对实际触发）**：`\AgentDailyBrief` 每日 **09:00**、`\AgentDailyBriefPM` 每日 **14:20**，动作都是 `C:\Users\dell\Desktop\Agent\run_brief.bat`（内部探测能 import pandas+requests 的解释器，跑 `daily_brief.py --push`，输出追加到 `briefs/task.log`）。**一天只产出一份文档**：12 点前写 `briefs/<日期>.md` 的「晨检」段（完整六节快照）；12 点后以当天晨检段为基线，**只生成相对晨检的变化**，追加「午后更新」段（重跑替换该段，不会再多出一份 `_pm.md`）。两轮都排在同步任务 `\DingTalkApprovalSync`（08:40 / 13:59）之后；午后 14:20 还刻意错开平台 `DataAdmin-AutoPipeline` 的 14:10（它要写事中日报，撞 WPS 锁会重试最多 5 分钟，简报晚 10 分钟跑才拿得到当天最新版）。
 - **注册/查状态走 PowerShell**（本机安全策略把 `schtasks.exe` 列入程序黑名单，调用会被拦）：
 
 ```powershell
