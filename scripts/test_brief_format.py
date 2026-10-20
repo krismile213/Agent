@@ -9,6 +9,7 @@
 """
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -275,6 +276,38 @@ def test_load_morning_strips_separator():
         check("重排后只有一条分隔线", doc2.count("\n---\n") == 1, str(doc2.count("\n---\n")))
 
 
+def test_resolve_run_slot_explicit_beats_clock():
+    """--pm/--am 显式参数必须压过挂钟: 上午补跑午后简报不能被判成晨检。"""
+    am10 = datetime(2026, 10, 20, 10, 0)      # 上午 10 点
+    pm23 = datetime(2026, 10, 20, 23, 30)     # 深夜
+    check("--pm 在上午也判午后", db.resolve_run_slot(True, False, am10) == (True, "_pm"))
+    check("--am 在深夜也判晨检", db.resolve_run_slot(False, True, pm23) == (False, ""))
+    try:
+        db.resolve_run_slot(True, True, am10)
+        check("--pm + --am 互斥抛错", False, "没抛错")
+    except ValueError:
+        check("--pm + --am 互斥抛错", True)
+
+
+def test_resolve_run_slot_clock_fallback():
+    """都没给参数时保持旧的挂钟行为(向后兼容旧调用/旧计划任务)。"""
+    check("12点前→晨检",
+          db.resolve_run_slot(False, False, datetime(2026, 10, 20, 9, 30)) == (False, ""))
+    check("12点后→午后",
+          db.resolve_run_slot(False, False, datetime(2026, 10, 20, 14, 45)) == (True, "_pm"))
+
+
+def test_pm_label_carries_tag():
+    """午后段的标签要带 PM 标记(用户要求"下午的加个pm标签")。"""
+    am = "## ① 同步状态与数据截至\n• 同步正常\n"
+    pm_body = "## ① 同步状态与数据截至\n• 与晨检一致\n"
+    doc = db.compose_daily("2026-10-20", am_body=am, pm_body=pm_body,
+                           am_label="晨检 09:30", pm_label="午后更新 14:10 · PM")
+    check("午后段标题带 PM", "## 午后更新 14:10 · PM" in doc, doc[:200])
+    check("晨检段不带 PM", "## 晨检 09:30" in doc)
+    check("更新记录里也带 PM", "午后更新 14:10 · PM" in doc)
+
+
 def main():
     print("=" * 60)
     print("[简报格式兜底单测] normalize_brief_md")
@@ -287,7 +320,9 @@ def main():
                test_compose_daily_merged, test_compose_pm_only_when_morning_missing,
                test_refine_delta_filters_false_new, test_parse_and_apply_counts,
                test_load_morning_strips_separator,
-               test_real_brief_idempotent):
+               test_real_brief_idempotent,
+               test_resolve_run_slot_explicit_beats_clock,
+               test_resolve_run_slot_clock_fallback, test_pm_label_carries_tag):
         print(f"\n== {fn.__name__} ==")
         fn()
     print("\n" + "=" * 60)

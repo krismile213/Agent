@@ -473,6 +473,26 @@ PM_TEMPLATE = """现在是当日午后更新({date} {hhmm})。今天 09:30 已�
 【基线结束】"""
 
 
+def resolve_run_slot(pm_flag: bool, am_flag: bool, now=None) -> tuple:
+    """决定本次运行是晨检还是午后 → (is_pm, suffix)。
+
+    显式参数优先(--pm / --am); 两个都没给才退回挂钟推断(兼容旧调用)。
+
+    为什么不能只看挂钟: 挂钟推断会在两种情况下判错段, 而且都是静默的 ——
+      a) 午后任务失败后延到次日上午补跑 → 被判成晨检, 午后内容写进晨检段,
+         把当天真正的晨检快照顶掉;
+      b) 晨检任务拖过 12:00 才跑完 → 被判成午后, 正常午后段被覆盖。
+    计划任务各自带 --am / --pm 就与"几点运行"彻底解耦。
+    """
+    if pm_flag and am_flag:
+        raise ValueError("--pm and --am are mutually exclusive")
+    if pm_flag or am_flag:
+        return bool(pm_flag), "_pm" if pm_flag else ""
+    now = now or datetime.now()
+    pm = now.hour >= 12
+    return pm, "_pm" if pm else ""
+
+
 def main():
     # 计划任务经 cmd >> task.log 重定向: 不 reconfigure 时 stdout 走 cp936。
     # 只 reconfigure stdout 会让 traceback(走 stderr)仍是 GBK, 日志混编码成乱码,
@@ -484,7 +504,13 @@ def main():
             pass
     ap = argparse.ArgumentParser(description="mini_agent 每日晨检简报")
     ap.add_argument("--push", action="store_true", help="若配置了钉钉webhook则推送")
+    ap.add_argument("--pm", action="store_true",
+                    help="显式声明本次为午后简报(不再看挂钟时间)")
+    ap.add_argument("--am", action="store_true",
+                    help="显式声明本次为晨检(不再看挂钟时间)")
     args = ap.parse_args()
+    if args.pm and args.am:
+        sys.exit("--pm 与 --am 互斥, 只能给一个")
 
     cfg = core.load_config()
     if not cfg["api_key"]:
@@ -497,8 +523,10 @@ def main():
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
     hhmm = now.strftime("%H:%M")
-    pm = now.hour >= 12
-    suffix = "_pm" if pm else ""
+    # am/pm 以显式参数为准; 两个都没给才退回挂钟推断(兼容旧调用)。
+    # 计划任务各自带 --am/--pm, 就与"几点运行"彻底解耦(详见 resolve_run_slot)。
+    pm, suffix = resolve_run_slot(args.pm, args.am, now)
+    pm_tag = " · PM" if pm else ""      # 午后的显式标记(标题/推送都用它, 方便机器 grep)
 
     brief_dir = HERE / "briefs"
     brief_dir.mkdir(exist_ok=True)
@@ -557,11 +585,11 @@ def main():
 
     if delta:
         body = compose_daily(today, am_body=morning, pm_body=answer,
-                             am_label=am_label, pm_label=f"午后更新 {hhmm}",
+                             am_label=am_label, pm_label=f"午后更新 {hhmm}{pm_tag}",
                              pm_usage=client.usage_summary())
     elif pm:
         body = compose_daily(today, pm_body=answer,
-                             pm_label=f"午后补全 {hhmm}",
+                             pm_label=f"午后补全 {hhmm}{pm_tag}",
                              pm_usage=client.usage_summary())
     else:
         body = compose_daily(today, am_body=answer, am_label=am_label,
@@ -581,7 +609,7 @@ def main():
         else:
             try:
                 import dingtalk_push
-                ok, msg = dingtalk_push.send(f"日报 {today} · {tag} {hhmm}",
+                ok, msg = dingtalk_push.send(f"日报 {today} · {tag} {hhmm}{pm_tag}",
                                              answer[:1800] or "(空)")
                 print(f"[{tag}] 推送{'成功' if ok else '失败'}: {msg}")
             except Exception as e:

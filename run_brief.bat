@@ -44,7 +44,10 @@ if not defined PY (
 )
 
 echo [launcher] interpreter: %PY%>>"%LOG%"
-"%PY%" "%APP_DIR%\daily_brief.py" --push >>"%LOG%" 2>&1
+rem Forward any extra args to daily_brief.py so callers can be explicit about
+rem which run this is, e.g.  call run_brief.bat --pm   (see run_brief_pm.bat).
+rem Without an arg the script still falls back to the wall clock.
+"%PY%" "%APP_DIR%\daily_brief.py" --push %* >>"%LOG%" 2>&1
 set "RC=%errorlevel%"
 echo [launcher] daily_brief exit=%RC%>>"%LOG%"
 exit /b %RC%
