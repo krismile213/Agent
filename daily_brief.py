@@ -609,8 +609,10 @@ def main():
         else:
             try:
                 import dingtalk_push
+                # 不再 [:1800] 硬截断: 截断会把 ⑤ 后半段拦腰砍掉(2026-10-20 实测
+                # 砍在 "美客多墨西哥 771"), 长文由 dingtalk_push 按段落自动分片
                 ok, msg = dingtalk_push.send(f"日报 {today} · {tag} {hhmm}{pm_tag}",
-                                             answer[:1800] or "(空)")
+                                             answer or "(空)")
                 print(f"[{tag}] 推送{'成功' if ok else '失败'}: {msg}")
             except Exception as e:
                 print(f"[{tag}] 推送异常(不影响落盘): {e}")
