@@ -190,12 +190,59 @@ def test_guard_and_degrade():
           out3.startswith("流程事中日报") and "— 在研状态总表" in out3)
 
 
+def test_fallback_name_selection():
+    """撞锁改名(平台侧 2026-10-20 约定): 同日并存 正式名(旧)+ _HHMMSS后缀(新) 时,
+    必须取新那份。旧选择逻辑按文件名末段比大小, "20261020" > "153000" 恒成立,
+    被占用写不进的旧正式名会赢 → 晨/午简报静默读到 09:00 旧数据。
+    """
+    import shutil
+    import tempfile
+
+    import pandas as pd
+    tmp = Path(tempfile.mkdtemp(prefix="inflight_fb_"))
+    try:
+        rpt = tmp / "data" / "手机膜" / "手机膜" / "reports"
+        rpt.mkdir(parents=True)
+
+        def mk(name, gen, mtime):
+            p = rpt / name
+            pd.DataFrame(
+                [[f"流程事中日报 · 手机膜 · 2026-10-20（生成于 {gen}）"]]
+            ).to_excel(p, index=False, header=False)
+            os.utime(p, (mtime, mtime))
+            return p
+
+        # 正式名 = 09:00 旧数据(正是被 Excel 占用、写不进去的那份); 后缀名 = 15:30 新数据
+        mk("事中日报_20261020.xlsx", "2026-10-20 09:00", 1_700_000_000)
+        mk("事中日报_20261020_153000.xlsx", "2026-10-20 15:30", 1_700_000_600)
+        prev = mk("事中日报_20261019.xlsx", "2026-10-19 09:00", 1_699_900_000)
+
+        reg = _mk_tools({"workmain_root": str(tmp)})
+        out = reg.tools["inflight_report"].func(line="手机膜")
+        # 注: 不能只断言 "09:00" not in out —— 工具来源行自带固定文案
+        # "平台每日09:00生成", 旧正式名的标题是 "生成于 2026-10-20 09:00"。
+        check("改名: 默认取最新 → _HHMMSS 后缀那份(旧正式名不得赢)",
+              "事中日报_20261020_153000.xlsx" in out
+              and "15:30" in out and "生成于 2026-10-20 09:00" not in out)
+        out2 = reg.tools["inflight_report"].func(line="手机膜", date="2026-10-20")
+        check("改名: date=2026-10-20 → 同取后缀新份",
+              "事中日报_20261020_153000.xlsx" in out2)
+        out3 = reg.tools["inflight_report"].func(line="手机膜", date="20261019")
+        check("改名: date=20261019 → 前一天正式名(后缀不串门)",
+              "事中日报_20261019.xlsx" in out3 and "15:30" not in out3)
+        check("改名: 不同日期不得按 mtime 误取(日期是第一排序键)",
+              "20261019" not in out and prev.exists())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_contract()
     test_unattended_registry()
     test_real()
     test_date_param()
     test_guard_and_degrade()
+    test_fallback_name_selection()
     tag = "全部通过" if not fails else f"失败 {len(fails)} 项"
     print(f"\n== {tag} ==")
     for f in fails:

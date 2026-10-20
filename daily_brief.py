@@ -21,7 +21,7 @@ Windows 计划任务(已注册, 2026-10-19 核对实际触发: AgentDailyBrief 0
 AgentDailyBriefPM 14:20, 动作都是 run_brief.bat; 排在上游同步任务
 DingTalkApprovalSync 的 08:40 / 13:59 之后, 午后还刻意错开平台
 DataAdmin-AutoPipeline 的 14:10 —— 它要在 14:10 写事中日报, 且撞锁会重试
-最多 5 分钟, 简报 14:20 再跑才读得到当天最新版). 本机 schtasks.exe 被安全策略拦,
+最多 5 分钟, 2026-10-20 起还会改写真名_HHMMSS 后缀落盘, 简报 14:20 再跑才读得到当天最新版). 本机 schtasks.exe 被安全策略拦,
 注册/查询一律走 PowerShell(模块名 ScheduledTasks):
   Get-ScheduledTask -TaskName AgentDailyBrief
   Set-ScheduledTask -TaskName AgentDailyBrief -Trigger (New-ScheduledTaskTrigger -Daily -At "09:00")

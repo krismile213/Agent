@@ -711,19 +711,33 @@ def register(registry, cfg: dict) -> int:
         if not cands:
             return (f"[错误] {reports} 下没有 事中日报_*.xlsx"
                     "(平台每日 09:00 生成; 上游未同步时会缺当天一份)")
+
+        # 撞锁改名约定（平台侧 2026-10-20）：Excel/WPS 占用正式名时，平台会
+        # 写真名_HHMMSS 后缀落盘。同一天可能两份：正式名(可能是旧的) + 后缀名(新)。
+        # 选文件必须「先 8 位日期、同日期比 mtime」——若按文件名末段比大小，
+        # "20261020" > "1530" 恒成立，被占用写不进去的旧正式名会赢，简报静默
+        # 读到旧数据。日期从 stem 里抓 8 位数字，后缀名/正式名一视同仁。
+        def _stamp(p):
+            m = re.search(r"(\d{8})", p.stem)
+            return m.group(1) if m else ""
+
+        def _recency(p):
+            return (p.stat().st_mtime, p.name)
+
         if date not in (None, ""):
             digits = re.sub(r"\D", "", str(date))
-            avail = ", ".join(p.stem.split("_")[-1] for p in cands[-8:])
+            avail = ", ".join(re.sub(r"^事中日报_", "", p.stem)
+                              for p in cands[-8:])
             if len(digits) != 8:
                 return (f"[错误] date 需为 YYYYMMDD 或 YYYY-MM-DD, 收到 {date!r}; "
                         f"不传则读最新一份。已有(最近8份): {avail}")
-            hit = [p for p in cands if p.stem.endswith("_" + digits)]
+            hit = [p for p in cands if _stamp(p) == digits]
             if not hit:
                 return (f"[错误] 没有 {line} {digits[:4]}-{digits[4:6]}-{digits[6:]} "
                         f"的事中日报。已有(最近8份): {avail}; 不传 date 读最新一份。")
-            f = hit[0]
+            f = max(hit, key=_recency)
         else:
-            f = max(cands, key=lambda p: (p.stem.rsplit("_", 1)[-1], p.stat().st_mtime))
+            f = max(cands, key=lambda p: (_stamp(p),) + _recency(p))
 
         try:
             xl = pd.ExcelFile(f)
@@ -763,7 +777,10 @@ def register(registry, cfg: dict) -> int:
             title = _free(t0.iloc[0, 0])
         except Exception:
             title = ""
-        d8 = f.stem.rsplit("_", 1)[-1]
+        # day 兜底自拼：与选文件同口径抓 8 位日期（撞锁改名的 _HHMMSS 后缀
+        # 不能被当成日期）。标题行(row0)自带日期，这里只在缺标题时兜底。
+        m8 = re.search(r"(\d{8})", f.stem)
+        d8 = m8.group(1) if m8 else f.stem.rsplit("_", 1)[-1]
         day = f"{d8[:4]}-{d8[4:6]}-{d8[6:]}" if len(d8) == 8 else d8
         # 标题行(row0)自带「品类·日期·生成时间」; 缺标题才自拼(旧版日报可能没有)
         out = [title or f"流程事中日报 · {line} · {day}",
