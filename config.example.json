@@ -5,6 +5,8 @@
   "model": "glm-4.7-flash",
   "model_fallbacks": ["glm-4.5-flash"],
   "temperature": 0.2,
+  "_thinking_说明": "推理模型开关: \"disabled\"=不发思考段(GLM-4.5/4.7-flash 默认先输出 reasoning_content, 实测同一问题 441 字思考+55 字正文, 关掉后 completion 从 280 降到 26 tokens; 思考还会挤占 max_tokens 导致正文为空)。删掉此字段=恢复默认(开启思考)。",
+  "thinking": "disabled",
   "max_turns": 30,
   "context_budget_tokens": 48000,
   "request_timeout": 120,

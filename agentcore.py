@@ -141,6 +141,20 @@ class LLMClient:
         return (f"LLM调用{u['calls']}次, prompt {u['prompt_tokens']:,} + "
                 f"completion {u['completion_tokens']:,} = {u['total_tokens']:,} tokens")
 
+    def _payload_extra(self) -> dict:
+        """模型侧开关(可选, 不配则与从前完全一致)。
+
+        `thinking: "disabled"` → 关闭推理模型的思考段(GLM-4.5/4.7-flash 默认会先
+        输出 reasoning_content 再给正文: 实测同一问题 441 字思考 + 55 字正文,
+        completion 280 tokens; 关掉后 26 tokens, 降 90%)。思考 token 既计入额度
+        又挤占 max_tokens 预算(思考吃满 → 正文为空/被截断), 对"照抄+归纳"型任务
+        没有收益, 故默认在 config 里关掉; 需要深推理的配置可以删掉这个字段。
+        """
+        mode = str(self.cfg.get("thinking") or "").strip().lower()
+        if mode in ("disabled", "off", "false"):
+            return {"thinking": {"type": "disabled"}}
+        return {}
+
     def chat(self, messages: list, tools: list | None = None) -> dict:
         """一次模型调用, 返回 assistant 消息 dict. 429/5xx/网络错误自动退避重试.
         全局限流+熔断保护(storage.guard); 每次调用遥测落库(时延/状态/重试)."""
@@ -149,7 +163,8 @@ class LLMClient:
         rl.acquire()
         models = self._model_chain()
         payload = {"model": models[0], "messages": messages,
-                   "temperature": self.cfg["temperature"]}
+                   "temperature": self.cfg["temperature"],
+                   **self._payload_extra()}
         if tools:
             payload["tools"] = tools
         headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
@@ -167,7 +182,11 @@ class LLMClient:
                     raise _FatalError(f"HTTP {r.status_code}: {r.text[:300]}")
                 data = r.json()
                 self._acc(data.get("usage"))
-                msg0 = (data.get("choices") or [{}])[0].get("message") or {}
+                ch0 = (data.get("choices") or [{}])[0]
+                msg0 = ch0.get("message") or {}
+                if ch0.get("finish_reason") == "length":
+                    # 思考段吃满预算会表现为"正文很短/为空", 别当成正常完成
+                    log("  [警告] 模型输出触顶(finish_reason=length), 正文可能被截断")
                 if not msg0.get("tool_calls") and not (msg0.get("content") or "").strip():
                     # 空响应: HTTP 200 但 message 无内容且无 tool_calls —— 服务端过载
                     # 会这样秒回, 当作失败进重试链(2026-10-10 午后简报空壳教训)
@@ -176,7 +195,8 @@ class LLMClient:
                 storage.llm_call(payload["model"],
                                  int((time.time() - t0) * 1000), "ok",
                                  attempt - 1, data.get("usage"), stream=False)
-                return data["choices"][0]["message"]
+                msg0.pop("reasoning_content", None)   # 思考段不进 history(白占上下文)
+                return msg0
             except _FatalError as fe:
                 br.record(False)
                 storage.llm_call(payload["model"],
@@ -203,7 +223,8 @@ class LLMClient:
         rl.acquire()
         models = self._model_chain()
         payload = {"model": models[0], "messages": messages,
-                   "temperature": self.cfg["temperature"], "stream": True}
+                   "temperature": self.cfg["temperature"], "stream": True,
+                   **self._payload_extra()}
         if tools:
             payload["tools"] = tools
         headers = {"Authorization": f"Bearer {self.cfg['api_key']}"}
