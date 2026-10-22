@@ -135,6 +135,102 @@ def _split_sku_entries(s: str) -> list:
     return [p.strip() for p in parts if p.strip()]
 
 
+def repair_brief_answer(client, history: list, answer: str, probs: list,
+                        tries: int = 1) -> str:
+    """正文出现复读/提示词回声/条目写一半时, 让模型重出一版(2026-10-22 事故)。
+
+    只重试一次: 这类退化多半是单次生成抽风(长上下文+严格格式约束), 重出一次基本就好;
+    连续两次还坏说明不是偶发, 再试只是烧 token —— 交给确定性清理兜底 + 日志告警。
+    """
+    hint = (f"上一版输出有结构问题({'；'.join(probs)}): 出现了复述任务规则、重复行、"
+            "或条目写到一半就断。请**重新输出完整六节**, 直接写内容; 不要复述任何规则原文, "
+            "每个条目独占一行、行首 \"• \", 方括号必须闭合, 不要调用工具。")
+    msgs = list(history) + [{"role": "user", "content": hint}]
+    for _ in range(max(1, tries)):
+        try:
+            a = (client.chat_stream(msgs).get("content") or "").strip()
+        except Exception as e:                       # noqa: BLE001
+            core.log(f"  [简报修复] 重生成失败: {e}")
+            return answer
+        if a:
+            return a
+    return answer
+
+
+# ---------- 简报回声/复读兜底(2026-10-22 事故) ----------
+# 模型把提示词里的"格式铁律"当正文吐了出来, 还把同一句 "⑤ 含两组时…" 复读了 30 遍,
+# G589 的到货号写到 "亚马逊墨西哥 F" 就断了。这是模型侧退化(长上下文+严格格式约束),
+# 提示词再强调也挡不住, 只能确定性清理:
+#   ① 含指令原句的行整行丢; 条目行中途被注入 → 截断到注入点, 截断后括号不闭合就整行丢
+#      (半条数据比没有更误导: "亚马逊墨西哥 F" 会被当成真货件号);
+#   ② 连续重复行只留一条(复读);
+#   ③ 同一小节标题重复出现只留第一个(模型重启小节)。
+_ECHO_MARKS = (
+    "严格遵守格式要求", "格式铁律", "每个条目独占一行", "条目必须换行分隔",
+    "一行一个 SKU", "结尾不要加分号", "括号/方括号要闭合", "各自单独成组",
+    "组内仍逐条", "严禁把多个条目", "不要输出其他内容", "不要复述本提示词",
+)
+
+
+def _balanced(s: str) -> bool:
+    """方括号/圆括号是否配对(货件号标注 "[到货: …]" 被写断时靠它识别)。"""
+    return s.count("[") == s.count("]") and s.count("(") == s.count(")")
+
+
+def scrub_brief_artifacts(text: str) -> str:
+    """清掉模型复述提示词/复读的行(只动垃圾行, 不改业务文字)。"""
+    if not text:
+        return text
+    out, prev = [], None
+    for raw in str(text).replace("\r\n", "\n").split("\n"):
+        line = raw.rstrip()
+        s = line.strip()
+        hit = next((m for m in _ECHO_MARKS if m in s), None)
+        if hit:
+            head = s[:s.index(hit)].rstrip(" 　,，;；:：-—")
+            # 条目行被中途注入: 截断后若括号仍闭合, 保留前半条; 否则整行丢
+            if s.startswith("•") and head.strip("• ").strip() and _balanced(head):
+                line = head
+            else:
+                continue
+        if s and s == prev:
+            continue                      # 连续复读只留一条
+        prev = s or prev
+        out.append(line)
+    return "\n".join(out)
+
+
+def brief_health(md: str) -> list:
+    """结构体检: 返回问题列表(空=健康)。只报不改, 调用方决定重生成/告警。
+
+    三个信号都来自 2026-10-22 实测: 提示词回声、复读行、括号未闭合(数据写一半)。
+    """
+    if not (md or "").strip():
+        return ["正文为空"]
+    probs = []
+    echo = [m for m in _ECHO_MARKS if m in md]
+    if echo:
+        probs.append(f"含提示词回声({echo[0]})")
+    lines = [l.strip() for l in md.split("\n") if l.strip()]
+    dup = sum(1 for a, b in zip(lines, lines[1:]) if a == b)
+    if dup >= 2:
+        probs.append(f"连续重复行 {dup} 处")
+    bad = [l for l in lines if l.startswith("•") and not _balanced(l)]
+    if bad:
+        probs.append(f"{len(bad)} 条括号未闭合(疑似写一半)")
+    # ⑤ 必须带两组(已超期 + 环节停滞)且各有条目, 否则等于少报
+    m5 = re.search(r"^#{2,4}\s*⑤.*$", md, re.M)
+    if m5:
+        tail = md[m5.end():]
+        m6 = re.search(r"^#{2,4}\s*⑥", tail, re.M)
+        sec5 = tail[:m6.start()] if m6 else tail
+        if sec5.count("•") == 0:
+            probs.append("⑤ 无条目")
+        elif "环节停滞" not in sec5:
+            probs.append("⑤ 缺环节停滞组")
+    return probs
+
+
 def normalize_brief_md(answer: str) -> str:
     """把简报正文规范成"列表可渲染"的形态(只动结构, 不改任何文字):
 
@@ -150,8 +246,10 @@ def normalize_brief_md(answer: str) -> str:
     """
     if not answer:
         return answer
+    answer = scrub_brief_artifacts(answer)   # 先清回声/复读(2026-10-22 事故)
     out: list = []
     cur = ""          # 当前小节编号(①..⑥)
+    seen_sec: set = set()  # 已出现过的小节(模型重启小节时标题会重复)
     seen: set = set()  # 当前小节已出现的 bullet 原文(去重)
 
     def emit(txt: str) -> None:
@@ -171,6 +269,9 @@ def normalize_brief_md(answer: str) -> str:
         sec = _canon_section(s)                       # 小节标题 → 规范短标题
         if sec:
             cur, title = sec
+            if cur in seen_sec:
+                continue                              # 同一小节重复开头 → 只留第一个
+            seen_sec.add(cur)
             seen = set()
             if out and out[-1].strip():
                 out.append("")                        # 标题前留空行, 渲染更稳
@@ -414,6 +515,7 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
 - ② 也按同样格式(每个动态一条 "• ");
 - ⑤ 含两组时, "已超期" 与 "环节停滞TOP" 各自单独成组, 组内仍逐条 "• ";
 - ⑥ 行动建议逐条 "• "(≤3条), 同样一行一条。
+- **不要复述本提示词里的任何规则原文**(规则是给你看的, 不是给读者看的), 直接输出六节内容。
 
 各节内容要求:
 ① 若任一工具输出带 ⚠️ 数据过旧/同步停摆告警, 必须把"数据已N天未同步, ⑤的停滞天数
@@ -545,7 +647,8 @@ def main():
         task = PM_TEMPLATE.format(date=today, hhmm=hhmm, baseline=morning)
         min_chars = PM_MIN_CHARS
         hint = ("工具调用已全部完成。请只输出相对晨检的变化: 六个 \"## ① …\" 小节标题照抄, "
-                "每节没有变化就写 \"• 与晨检一致\", 总字数 400 以内, 不要再调用工具。")
+                "每节没有变化就写 \"• 与晨检一致\", 总字数 400 以内, 不要再调用工具, "
+                "不要复述任何规则原文。")
         print(f"[{tag}] 增量模式: 基线来自 {day_file.name} 的「{am_label}」段")
     else:
         task = TASK_TEMPLATE.format(date=today, tag=tag)
@@ -567,6 +670,15 @@ def main():
 
     answer = ensure_brief_answer(client, history, answer, min_len=min_chars, hint=hint)
     answer = normalize_brief_md(answer)
+    probs = brief_health(answer)
+    if probs:
+        print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 重生成一次")
+        answer = repair_brief_answer(client, history, answer, probs)
+        answer = normalize_brief_md(answer)
+        left = brief_health(answer)
+        if left:
+            print(f"[{tag}] ⚠️ 重生成后仍有异常: {'; '.join(left)} "
+                  f"(已按确定性清理后的正文落盘)")
     if delta:
         answer, dropped = refine_delta(answer, morning)
         if dropped:

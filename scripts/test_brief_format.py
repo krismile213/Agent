@@ -308,6 +308,71 @@ def test_pm_label_carries_tag():
     check("更新记录里也带 PM", "午后更新 14:10 · PM" in doc)
 
 
+def test_scrub_echo_line_dropped():
+    """2026-10-22 事故: 模型把提示词"格式铁律"当正文吐出来, 整行必须清掉。"""
+    raw = ("## ⑤ 已超期与环节停滞TOP\n\n"
+           "• G591 Honor Robot Phone 5G 已超5天[空运]\n"
+           "严格遵守格式要求，每个条目独占一行，行首统一 \"• \"，条目必须换行分隔。\n"
+           "• G587 Xiaomi Poco M8 已超6天[空运]\n")
+    out = db.normalize_brief_md(raw)
+    check("回声: 指令原句整行被清掉", "严格遵守格式要求" not in out)
+    check("回声: 正常条目不受影响", "• G591" in out and "• G587" in out)
+
+
+def test_scrub_midline_injection():
+    """条目写到一半被注入规则文本: 括号闭合→保留前半条; 不闭合→整行丢。"""
+    good = ("## ⑤ 已超期与环节停滞TOP\n"
+            "• G589 vivo S2 5G 已超6天[空运] (启动08-17, 卡Part8) 严格遵守格式要求，一行一个 SKU\n")
+    out = db.normalize_brief_md(good)
+    check("中途注入(括号闭合): 截断保留数据", "G589 vivo S2 5G 已超6天" in out)
+    check("中途注入(括号闭合): 注入文本消失", "严格遵守格式要求" not in out)
+
+    bad = ("## ⑤ 已超期与环节停滞TOP\n"
+           "• G589 vivo S2 5G 已超6天[空运] [到货: 亚马逊墨西哥 F严格遵守格式要求，一行一个 SKU\n")
+    out2 = db.normalize_brief_md(bad)
+    check("中途注入(括号未闭合): 整行丢弃, 不留半条货件号",
+          "G589" not in out2 and "亚马逊墨西哥 F" not in out2)
+
+
+def test_scrub_consecutive_repeats():
+    """复读 30 遍的同一行只留一条(本次事故的形态)。"""
+    line = '⑤ 含两组时, "已超期" 与 "环节停滞TOP" 各自单独成组, 组内仍逐条 "• "。'
+    raw = "## ⑤ 已超期与环节停滞TOP\n\n" + "\n\n".join([line] * 30) + "\n"
+    out = db.normalize_brief_md(raw)
+    check("复读: 30 行重复只留 1 行", out.count("组内仍逐条") <= 1,
+          extra=str(out.count("组内仍逐条")))
+
+
+def test_duplicate_section_header_collapsed():
+    """模型重启小节 → 同一小节标题出现两次, 只留第一个。"""
+    raw = ("## ⑤ 已超期与环节停滞TOP\n\n已超期 22 个\n• G591 已超5天\n\n"
+           "## ⑤ 已超期与环节停滞TOP\n\n环节停滞TOP 228单\n• G493 停滞115天\n")
+    out = db.normalize_brief_md(raw)
+    check("重复小节标题: 只保留一个", out.count("⑤ 已超期与环节停滞TOP") == 1,
+          extra=str(out.count("⑤ 已超期与环节停滞TOP")))
+    check("重复小节标题: 两组内容都在", "G591" in out and "G493" in out)
+
+
+def test_brief_health_signals():
+    """体检要能抓住本次三种病征, 干净正文不许误报。"""
+    dirty = ("## ⑤ 已超期与环节停滞TOP\n"
+             "• G589 vivo S2 5G [到货: 亚马逊墨西哥 F\n"
+             "严格遵守格式要求\n"
+             "x\nx\nx\n")
+    probs = db.brief_health(dirty)
+    joined = " ".join(probs)
+    check("体检: 抓到提示词回声", "回声" in joined, extra=joined)
+    check("体检: 抓到括号未闭合", "括号未闭合" in joined, extra=joined)
+    check("体检: 抓到连续重复行", "重复行" in joined, extra=joined)
+    check("体检: 空正文报错", db.brief_health("  ") == ["正文为空"])
+    clean = ("## ⑤ 已超期与环节停滞TOP\n\n已超期 22 个; 另历史遗留 69 个不列\n"
+             "• G591 Honor Robot Phone 5G 已超5天[空运]\n\n"
+             "环节停滞TOP 228单 (段级停滞=距最后更新vs环节目标)\n"
+             "• G493 Part6 停滞115天/目标13天 (超102天)\n")
+    check("体检: 干净正文零问题", db.brief_health(clean) == [],
+          extra=str(db.brief_health(clean)))
+
+
 def main():
     print("=" * 60)
     print("[简报格式兜底单测] normalize_brief_md")
@@ -322,7 +387,10 @@ def main():
                test_load_morning_strips_separator,
                test_real_brief_idempotent,
                test_resolve_run_slot_explicit_beats_clock,
-               test_resolve_run_slot_clock_fallback, test_pm_label_carries_tag):
+               test_resolve_run_slot_clock_fallback, test_pm_label_carries_tag,
+               test_scrub_echo_line_dropped, test_scrub_midline_injection,
+               test_scrub_consecutive_repeats, test_duplicate_section_header_collapsed,
+               test_brief_health_signals):
         print(f"\n== {fn.__name__} ==")
         fn()
     print("\n" + "=" * 60)
