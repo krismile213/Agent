@@ -389,7 +389,9 @@ def refine_delta(pm_md: str, baseline: str):
 # 计数本来就写在 pipeline_alerts 的小节标题里, 直接解析比让模型复述稳。
 _CNT_WARN = re.compile(r"临期预警\(剩≤\d+天,\s*(\d+)\s*个\)|临期\s*(\d+)\s*个")
 _CNT_OVER = re.compile(r"已超期\(超全流程线,\s*(\d+)\s*个|已超期\s*(\d+)\s*个")
-_CNT_STALE = re.compile(r"环节停滞超目标\([^)]*?(\d+)\s*单|停滞\s*(\d+)\s*单")
+_CNT_STALE = re.compile(r"环节停滞超目标\([^)]*?(\d+)\s*单"
+                        r"|环节停滞TOP\s*(\d+)\s*单"
+                        r"|停滞\s*(\d+)\s*单")
 
 
 def _first_int(pat, text):
@@ -407,6 +409,128 @@ def parse_counts(text: str) -> dict:
     return {"warn": _first_int(_CNT_WARN, text),
             "over": _first_int(_CNT_OVER, text),
             "stale": _first_int(_CNT_STALE, text)}
+
+
+# ---------- ③④⑤ 确定性渲染(2026-10-22) ----------
+# 这三节本来就是工具输出的成品行(编号/型号/天数/货件号), 让模型"照抄"是这半个月
+# 四起事故的共同根因(挤成一坨/被截断/复读/货件号写一半)。工具每节格式固定:
+#   == 标题(含计数) ==
+#     <两空格缩进的条目>
+#   直接搬, 一个字符都不经模型 —— 数据段从此不可能出错, 也省掉三节的输出 token。
+_PA_SEC = re.compile(r"^==\s*(.+?)\s*==$")
+_PA_ITEM = re.compile(r"^\s{2,}(\S.*)$")
+_SEC_SPLIT = re.compile(r"^##\s*([①②③④⑤⑥])\s*(.*)$", re.M)
+_SEC_TITLES = {"③": "新增SKU与签样追踪", "④": "临期预警", "⑤": "已超期与环节停滞TOP"}
+
+
+def _pa_sections(tool_out: str) -> dict:
+    """pipeline_alerts 输出 → {节标题: [原始行…]}。"""
+    secs, cur = {}, None
+    for raw in (tool_out or "").split("\n"):
+        line = raw.rstrip()
+        m = _PA_SEC.match(line.strip())
+        if m:
+            cur = m.group(1)
+            secs.setdefault(cur, [])
+            continue
+        if cur is not None and line.strip():
+            secs[cur].append(line)
+    return secs
+
+
+def _pa_items(lines) -> tuple:
+    """条目行(两空格缩进) → (条目列表, 尾注列表)。尾注如「未签样待跟进 4 个…」。"""
+    items, notes = [], []
+    for l in lines:
+        m = _PA_ITEM.match(l)
+        if not m:
+            continue
+        t = m.group(1).strip()
+        (notes if t.startswith("未签样待跟进") else items).append(t)
+    return items, notes
+
+
+def render_data_sections(tool_out: str) -> dict:
+    """从工具输出渲染 ③④⑤。一节都取不到 → {}（调用方保留模型原文）。
+
+    ⑤ 的计数行写法必须与 `_CNT_OVER` 对齐（"已超期 22 个"）——午后靠它对数。
+    """
+    secs = _pa_sections(tool_out)
+    if not secs:
+        return {}
+
+    def pick(*keys):
+        for k, v in secs.items():
+            if any(x in k for x in keys):
+                return k, v
+        return None, None
+
+    out = {}
+    k, v = pick("新增SKU")
+    if k:
+        items, notes = _pa_items(v)
+        if items:
+            out["③"] = "\n".join([f"• {i}" for i in items] + notes)
+
+    k, v = pick("临期预警")
+    if k:
+        items, _ = _pa_items(v)
+        if items:
+            warn = _first_int(_CNT_WARN, k)
+            # 带计数行: 午后要靠它对数, 否则只能写"晨检未记录总数"(2026-10-20 的噪音)
+            head = [f"临期 {warn} 个"] if warn is not None else []
+            out["④"] = "\n".join(head + [f"• {i}" for i in items])
+
+    k, v = pick("已超期")
+    if k:
+        items, _ = _pa_items(v)
+        if items:
+            over = _first_int(_CNT_OVER, k)
+            legacy = re.search(r"另历史遗留\s*(\d+)\s*个", k)
+            head = f"已超期 {over} 个" if over is not None else "已超期"
+            if legacy:
+                head += f"; 另历史遗留 {legacy.group(1)} 个不列"
+            out["⑤"] = "\n".join([head] + [f"• {i}" for i in items])
+
+    k, v = pick("环节停滞")
+    if k:
+        items, _ = _pa_items(v)
+        if items:
+            stale = _first_int(_CNT_STALE, k)
+            g2 = (f"环节停滞TOP {stale}单 (段级停滞=距最后更新vs环节目标)"
+                  if stale is not None else "环节停滞TOP (段级停滞=距最后更新vs环节目标)")
+            body = g2 + "\n" + "\n".join(f"• {i}" for i in items)
+            out["⑤"] = (out["⑤"] + "\n\n" + body) if out.get("⑤") else body
+    return out
+
+
+def replace_data_sections(md: str, tool_out: str) -> tuple:
+    """把 ③④⑤ 正文换成工具渲染版；模型漏写的节按序补上。
+
+    返回 (新正文, 被替换/补上的节编号列表)。渲染取不到 → 原样返回。
+    """
+    rendered = render_data_sections(tool_out)
+    if not rendered or not (md or "").strip():
+        return md, []
+    parts = _SEC_SPLIT.split(md)
+    head, blocks = parts[0], []
+    for i in range(1, len(parts), 3):
+        blocks.append([parts[i], parts[i + 1],
+                       parts[i + 2] if i + 2 < len(parts) else ""])
+    hit = []
+    for b in blocks:
+        if b[0] in rendered:
+            b[2] = "\n" + rendered[b[0]].rstrip() + "\n"
+            hit.append(b[0])
+    for num in sorted(rendered):
+        if num not in [b[0] for b in blocks]:
+            blocks.append([num, _SEC_TITLES.get(num, ""),
+                           "\n" + rendered[num].rstrip() + "\n"])
+            hit.append(num)
+    blocks.sort(key=lambda b: "①②③④⑤⑥".index(b[0]))
+    body = "\n".join([head.rstrip()] + [f"## {n} {t}".rstrip() + "\n" + c
+                                        for n, t, c in blocks])
+    return body.strip() + "\n", hit
 
 
 def _count_line(label: str, now, base, unit: str = "个") -> str:
@@ -524,17 +648,9 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
 ② 若 pipeline_alerts 的 Part9新单待办 层有单, 逐条带SKU与当前负责人列出; 每条写清
    "哪条SKU/型号 · 在哪个Part(环节) · 审批状态 · 最新审批节点+操作人+时间 · 当前负责人",
    直接抄工具给的明细; 工具没给节点明细就注明"仅字段更新"。
-③ 编号+型号+创建日+签样状态: 已签样给"签样MM-DD + 当前环节/已持续/时效"(直接抄工具给的
-   "现PartX 已持续N天/时效M天"), 未签样给"未签样N天/目标M天"; 超目标(⚠️)的排在前面,
-   其余按龄期降序。这一节对应 data/report 事中汇报表的签样追踪。
-④ 按剩余天数升序, 带卡点与空运/海运口径。
-⑤ 带超标天数, 并注明口径"段级停滞=距最后更新vs环节目标", 不要写成全流程耗时;
-   组标签必须带工具给的**计数**(如"已超期 22 个; 另历史遗留 69 个不列"), 午后要靠它对数;
-   scan_sync_data 与 pipeline_alerts 的停滞口径不同, 同一SKU数字可能差1天以上,
-   引用时注明来源工具。
-   注: ④⑤ 条目若带 "[到货: 地区 货件号]" 标注(来源=Part8到货表的"到货渠道仓"+"货件号"),
-   必须**逐字符原样照抄**(货件号/地区名一个字符都不能改, 不得改写、合并、缩写或插入
-   任何字)——这就是加急催办要的"地区+货件号"(俗称"火箭"标记); 同批多站多货件照工具给的抄。
+③④⑤ 三节的**条目明细由系统从工具输出自动填充**(逐字符照搬, 保证货件号不失真)。
+   你**不要写这三节的条目**——只输出三行小节标题即可; 写了也会被覆盖, 白费 token。
+   需要你写的是: ① 的同步结论、② 的动态叙述、⑥ 的行动建议。
 ⑥ ≤3条。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。"""
 
 
@@ -670,6 +786,16 @@ def main():
 
     answer = ensure_brief_answer(client, history, answer, min_len=min_chars, hint=hint)
     answer = normalize_brief_md(answer)
+    if not delta:
+        # ③④⑤ 由工具输出确定性渲染(不经模型): 数据段从此不可能被写坏/复读/写一半。
+        # 取不到工具节就保留模型原文, 不阻断落盘。
+        try:
+            answer, hit = replace_data_sections(
+                answer, registry.execute("pipeline_alerts", {}))
+            if hit:
+                print(f"[{tag}] ③④⑤ 确定性渲染: {'/'.join(hit)}")
+        except Exception as e:                  # noqa: BLE001
+            print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
     probs = brief_health(answer)
     if probs:
         print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 重生成一次")

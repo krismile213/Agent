@@ -373,6 +373,81 @@ def test_brief_health_signals():
           extra=str(db.brief_health(clean)))
 
 
+_TOOL_OUT = """目录: data/手机膜/手机膜  口径: 全流程线 空运60/海运69(权威表)
+数据截至(最新更新时间): 2026-10-21 17:49
+
+== 最近40天新增SKU(09-12~10-22, 8个; 含签样追踪) ==
+  G598 Xiaomi Redmi 17 4G/5G (创建 09-16, 签样 09-23, 现Part8 已持续1天/时效15天)
+  G602 Samsung Galaxy F70 Pro/M47 5G (创建 10-10, ⚠️未签样 15天/目标12天)
+  未签样待跟进 4 个(锚点: 取数/目标12天·或创建/目标87天); 最久 G603(15天)
+
+== 临期预警(剩≤15天, 6个) ==
+  G592 Xiaomi Poco F9 Pro/Redmi K100 Pro 5G 剩2天[空运] (启动08-25, 卡Part8) [到货: 美客多墨西哥 77739558；亚马逊墨西哥 FBA19QR4PKLJ 共14个]
+
+== 已超期(超全流程线, 22个; 另历史遗留69个不列) ==
+  G591 Honor Robot Phone 5G 已超5天[空运] (启动08-18, 卡Part2)
+  G589 vivo S2 5G 已超6天[空运] (启动08-17, 卡Part8) [到货: 亚马逊墨西哥 FBA19PZ6XB8L；美客多墨西哥 77190375 共14个]
+
+== 环节停滞超目标(段级口径: 距最后更新vs环节目标, 228单, 行级可重复) TOP ==
+  G493 Part6 停滞115天/目标13天 (超102天)
+  G550 Part8 停滞115天/目标35天 (超80天)
+
+== Part9新单待办(创建≤7天且审批中, 3单; 悬挂旧单不在此列) ==
+  G600 Xiaomi 18 Pro 5G (创建 10-16 11:23, 当前负责人: 胡浩明)
+"""
+
+
+def test_render_data_sections():
+    """③④⑤ 从工具输出直出: 货件号逐字符保真, 计数行能被 parse_counts 认。"""
+    r = db.render_data_sections(_TOOL_OUT)
+    check("渲染: 三节齐全", set(r) == {"③", "④", "⑤"}, extra=str(set(r)))
+    check("渲染: ③ 条目带 bullet", "• G598 Xiaomi Redmi 17 4G/5G" in r["③"])
+    check("渲染: ③ 保留未签样尾注", "未签样待跟进 4 个" in r["③"])
+    check("渲染: ④ 货件号逐字符照搬",
+          "亚马逊墨西哥 FBA19QR4PKLJ 共14个" in r["④"])
+    check("渲染: ④ 带计数行(午后对数用)",
+          r["④"].startswith("临期 6 个"), extra=r["④"][:20])
+    check("渲染: ④ 计数可被 parse_counts 认出",
+          db.parse_counts(r["④"])["warn"] == 6)
+    check("渲染: ⑤ 计数行写法对齐 _CNT_OVER",
+          r["⑤"].startswith("已超期 22 个; 另历史遗留 69 个不列"), extra=r["⑤"][:40])
+    check("渲染: ⑤ 两组都在",
+          "• G591" in r["⑤"] and "环节停滞TOP 228单" in r["⑤"] and "• G493" in r["⑤"])
+    check("渲染: 货件号没被截断", "FBA19PZ6XB8L" in r["⑤"])
+    cnt = db.parse_counts(r["⑤"])
+    check("渲染: 计数可被 parse_counts 认出",
+          (cnt["over"], cnt["stale"]) == (22, 228), extra=str(cnt))
+    check("渲染: 空输入不炸", db.render_data_sections("") == {})
+
+
+def test_replace_data_sections_overrides_garbage():
+    """模型把 ⑤ 写坏(复读+货件号写一半) → 整节被工具渲染版覆盖。"""
+    bad = ("## ③ 新增SKU与签样追踪\n\n• G598 乱写\n\n"
+           "## ④ 临期预警\n\n• 与晨检一致\n\n"
+           "## ⑤ 已超期与环节停滞TOP\n\n"
+           "• G589 vivo S2 5G [到货: 亚马逊墨西哥 F严格遵守格式要求，一行一个 SKU\n"
+           "⑤ 含两组时, \"已超期\" 与 \"环节停滞TOP\" 各自单独成组, 组内仍逐条 \"• \"。\n")
+    out, hit = db.replace_data_sections(bad, _TOOL_OUT)
+    check("覆盖: ③④⑤ 三节都被替换", sorted(hit) == ["③", "④", "⑤"], extra=str(hit))
+    check("覆盖: 垃圾文本消失", "严格遵守格式要求" not in out and "组内仍逐条" not in out)
+    check("覆盖: 半截货件号消失", "亚马逊墨西哥 F\n" not in out and "亚马逊墨西哥 F " not in out)
+    check("覆盖: 完整货件号回来了", "FBA19PZ6XB8L" in out)
+    check("覆盖: 标题只出现一次", out.count("⑤ 已超期与环节停滞TOP") == 1)
+
+
+def test_replace_data_sections_inserts_missing():
+    """模型漏写 ③⑤(现在允许它不写) → 按序补上, 顺序不乱。"""
+    md = ("## ① 同步状态与数据截至\n\n• 同步正常\n\n"
+          "## ② 今日动态\n\n• 无新增\n\n"
+          "## ④ 临期预警\n\n\n\n"
+          "## ⑥ 行动建议\n\n• 跟进 G592\n")
+    out, hit = db.replace_data_sections(md, _TOOL_OUT)
+    check("补齐: ③⑤ 补上、④ 覆盖", sorted(hit) == ["③", "④", "⑤"], extra=str(hit))
+    order = [out.index(f"## {n}") for n in "①②③④⑤⑥"]
+    check("补齐: 六节顺序正确", order == sorted(order), extra=str(order))
+    check("补齐: ④ 原有内容被覆盖", "G592" in out)
+
+
 def main():
     print("=" * 60)
     print("[简报格式兜底单测] normalize_brief_md")
@@ -390,7 +465,9 @@ def main():
                test_resolve_run_slot_clock_fallback, test_pm_label_carries_tag,
                test_scrub_echo_line_dropped, test_scrub_midline_injection,
                test_scrub_consecutive_repeats, test_duplicate_section_header_collapsed,
-               test_brief_health_signals):
+               test_brief_health_signals, test_render_data_sections,
+               test_replace_data_sections_overrides_garbage,
+               test_replace_data_sections_inserts_missing):
         print(f"\n== {fn.__name__} ==")
         fn()
     print("\n" + "=" * 60)
