@@ -180,13 +180,13 @@ python daily_brief.py --push
 python dingtalk_push.py --title "测试" --text "hello" --dry
 ```
 
-> `daily_brief.py` 立即跑一次晨检（查同步日志+预警清单 → `briefs/<日期>.md`）；`--push` 配了 webhook 时同时推送到钉钉群；最后一行是推送工具（`--dry` 不真正发送）。
+> `daily_brief.py` 立即跑一次晨检（查同步日志+预警清单 → `briefs/<YYYY-MM>/<日期>.md`（按月归档））；`--push` 配了 webhook 时同时推送到钉钉群；最后一行是推送工具（`--dry` 不真正发送）。
 
 - **无人值守安全**：晨检用只读注册表（写级工具全部摘除），挂计划任务也零副作用
 - **③④⑤ 确定性渲染（2026-10-22 起）**：这三节本来就是 `pipeline_alerts` 输出的成品行（编号/型号/天数/货件号），让模型"照抄"是半个月内四起事故的共同根因。现在由 `render_data_sections` 逐字符照搬工具行、`replace_data_sections` 覆盖模型版本（模型漏写则按序补上），模型只负责 ① 同步结论、② 动态叙述、⑥ 行动建议。数据段从此不可能被写坏、复读或写一半，同时省掉三节输出 token。渲染取不到工具节时保留模型原文，不阻断落盘。
 - **正文退化防线（2026-10-22 事故后加）**：模型会把提示词里的「格式铁律」当正文吐出来，并把同一句复读几十遍，甚至把货件号写到一半（`亚马逊墨西哥 F` + 规则原文，后接 30 行重复）。两层防护：① `scrub_brief_artifacts` 确定性清理——含规则原句的行整行丢、条目中途被注入则截断到注入点（截断后括号不闭合就整行丢，避免半条货件号被当真）、连续重复行只留一条、同一小节重复开头只留第一个；② `brief_health` 结构体检（回声/复读/括号未闭合/⑤ 缺组），命中则 `repair_brief_answer` 重生成一次，仍坏则按清理后的正文落盘并在 `task.log` 告警。提示词同步加了「不要复述规则原文」。单测见 `scripts/test_brief_format.py`
 - **空简报防线（2026-10-10 事故后加）**：免费档限流（429/1305 过载）会把 LLM 流式响应掐空——HTTP 200 建连但一个字没吐。两层防护：① `agentcore` 的 chat/chat_stream 检测"空响应/空流"（无 content 且无 tool_calls）自动进重试链换模型；② `daily_brief` 对正文不足 100 字的简报基于已收集的工具输出退避重生成（20s/40s 两次），仍短则**只落盘不推送**并以退出码 1 结束（宁可缺一期简报，不发空壳占位；`Get-ScheduledTaskInfo` 的 LastTaskResult 非 0 可见）。单测 `scripts/test_brief_guard.py`（16 项，已入 fast 层）
-- **计划任务（已注册，2026-10-19 核对实际触发）**：`\AgentDailyBrief` 每日 **09:00**、`\AgentDailyBriefPM` 每日 **14:20**（内部探测能 import pandas+requests 的解释器，跑 `daily_brief.py --push`，输出追加到 `briefs/task.log`）。**一天只产出一份文档**：12 点前写 `briefs/<日期>.md` 的「晨检」段（完整六节快照）；12 点后以当天晨检段为基线，**只生成相对晨检的变化**，追加「午后更新」段（重跑替换该段，不会再多出一份 `_pm.md`）。两轮都排在同步任务 `\DingTalkApprovalSync`（08:40 / 13:59）之后；午后 14:20 还刻意错开平台 `DataAdmin-AutoPipeline` 的 14:10（它要写事中日报，撞 WPS 锁会重试最多 5 分钟、2026-10-20 起还会改写真名_HHMMSS 后缀落盘，简报晚 10 分钟跑才拿得到当天最新版）。
+- **计划任务（已注册，2026-10-19 核对实际触发）**：`\AgentDailyBrief` 每日 **09:00**、`\AgentDailyBriefPM` 每日 **14:20**（内部探测能 import pandas+requests 的解释器，跑 `daily_brief.py --push`，输出追加到 `briefs/task.log`）。**一天只产出一份文档**：12 点前写 `briefs/<YYYY-MM>/<日期>.md`（按月归档）的「晨检」段（完整六节快照）；12 点后以当天晨检段为基线，**只生成相对晨检的变化**，追加「午后更新」段（重跑替换该段，不会再多出一份 `_pm.md`）。两轮都排在同步任务 `\DingTalkApprovalSync`（08:40 / 13:59）之后；午后 14:20 还刻意错开平台 `DataAdmin-AutoPipeline` 的 14:10（它要写事中日报，撞 WPS 锁会重试最多 5 分钟、2026-10-20 起还会改写真名_HHMMSS 后缀落盘，简报晚 10 分钟跑才拿得到当天最新版）。
   - **晨/午必须显式声明，别看挂钟**：`daily_brief.py` 以前用 `now.hour >= 12` 猜 am/pm，会在「午后失败后次日上午补跑」（写成晨检段、顶掉真晨检）和「晨检拖过 12 点」（写成午后段、挤掉真午后）时**静默判错段**。现在 `--pm` / `--am` 显式指定，没给才退回挂钟。**午后任务请指向 `run_brief_pm.bat`**（内部 `call run_brief.bat --pm`）；`run_brief.bat` 透传 extra args，手动 `call run_brief.bat --pm` 也行。
   - 午后段标题与钉钉推送标题都带 ` · PM` 标记（如 `## 午后更新 14:20 · PM`、`日报 2026-10-20 · 午后更新 14:20 · PM`），方便肉眼和 grep 区分晨/午。
 - **注册/查状态走 PowerShell**（本机安全策略把 `schtasks.exe` 列入程序黑名单，调用会被拦）：

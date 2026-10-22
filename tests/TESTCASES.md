@@ -109,7 +109,7 @@
 
 | ID | 用例 | 状态 | 命令 / 覆盖 | 预期 |
 |---|---|---|---|---|
-| TC-D01 | 晨检落盘（只读注册表） | auto | `python daily_brief.py`（已多次真跑） | briefs/<日期>.md 六节结构，摘除写工具日志出现 |
+| TC-D01 | 晨检落盘（只读注册表） | auto | `python daily_brief.py`（已多次真跑） | briefs/<本月>/<日期>.md 六节结构，摘除写工具日志出现 |
 | TC-D02 | 推送（加签） | auto | `--push`（已真跑） | 群里收到简报 |
 | TC-D03 | 推送 dry 模式 | auto | `python dingtalk_push.py --title t --text x --dry` | 只打印不发送 |
 | TC-D04 | 计划任务存在 | manual | `Get-ScheduledTaskInfo -TaskName AgentDailyBrief`（本机 schtasks 被黑名单拦） | 下次运行时间 09:30 |

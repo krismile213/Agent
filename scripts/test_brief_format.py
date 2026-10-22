@@ -20,6 +20,13 @@ import daily_brief as db  # noqa: E402
 FAILS = []
 
 
+def _brief_file(name: str) -> Path:
+    """briefs 按月份归档(2026-10-22 起) → briefs/<YYYY-MM>/<name>; 兼容扁平旧布局。"""
+    base = HERE.parent / "briefs"
+    p = base / name[:7] / name
+    return p if p.exists() else base / name
+
+
 def check(name, cond, extra=""):
     print(("  ✓ " if cond else "  ✗ ") + name + (f"  [{extra}]" if extra and not cond else ""))
     if not cond:
@@ -109,7 +116,7 @@ def test_empty_and_none():
 
 def test_real_brief_idempotent():
     """拿昨天(2026-10-15)真实简报跑一遍: 能改成全 bullet, 且条目数守恒。"""
-    p = HERE.parent / "briefs" / "2026-10-15_pm.md"
+    p = _brief_file("2026-10-15_pm.md")
     if not p.exists():
         print("  - (跳过) 真实简报夹具不存在")
         return
@@ -176,7 +183,7 @@ def test_dup_and_double_bullet():
 
 
 def test_compose_daily_merged():
-    """晨检 + 午后 → 同一份 briefs/<日期>.md; 重跑午后只替换午后段。"""
+    """晨检 + 午后 → 同一份 briefs/<YYYY-MM>/<日期>.md; 重跑午后只替换午后段。"""
     am = "## ① 同步状态与数据截至\n• 同步正常\n## ③ 新增SKU与签样追踪\n• G601 Xiaomi 18 Pro Max 5G\n"
     pm = "## ① 同步状态与数据截至\n• 与晨检一致\n## ② 今日动态\n• G603 Honor Magic V6 5G 新单\n"
     doc = db.compose_daily("2026-10-19", am_body=am, pm_body=pm,
@@ -448,6 +455,26 @@ def test_replace_data_sections_inserts_missing():
     check("补齐: ④ 原有内容被覆盖", "G592" in out)
 
 
+def test_archive_layout_by_month():
+    """落盘按月归档: briefs/<YYYY-MM>/<日期>.md, 且兼容未归档的扁平旧文件。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        check("月份取自日期前7位", db.month_of("2026-10-22") == "2026-10",
+              db.month_of("2026-10-22"))
+        check("规范路径带月目录",
+              db.brief_path("2026-10-22", base) == base / "2026-10" / "2026-10-22.md",
+              str(db.brief_path("2026-10-22", base)))
+        check("文件不存在时返回 None", db.find_brief("2026-10-22", base) is None)
+        (base / "2026-10").mkdir()
+        (base / "2026-10" / "2026-10-22.md").write_text("x", encoding="utf-8")
+        check("月目录里能找到",
+              db.find_brief("2026-10-22", base) == base / "2026-10" / "2026-10-22.md")
+        (base / "2026-10-23.md").write_text("x", encoding="utf-8")
+        check("扁平旧布局仍可读(归档切换过渡)",
+              db.find_brief("2026-10-23", base) == base / "2026-10-23.md")
+
+
 def main():
     print("=" * 60)
     print("[简报格式兜底单测] normalize_brief_md")
@@ -467,7 +494,8 @@ def main():
                test_scrub_consecutive_repeats, test_duplicate_section_header_collapsed,
                test_brief_health_signals, test_render_data_sections,
                test_replace_data_sections_overrides_garbage,
-               test_replace_data_sections_inserts_missing):
+               test_replace_data_sections_inserts_missing,
+               test_archive_layout_by_month):
         print(f"\n== {fn.__name__} ==")
         fn()
     print("\n" + "=" * 60)

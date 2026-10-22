@@ -6,10 +6,10 @@ daily_brief.py — 无人值守的每日流程日报(定时任务入口)
 设计(无人值守三原则):
   1. 只读注册表: 把写级工具全部摘掉, 挂到计划任务跑也不可能有副作用
   2. 固定任务提示: sync_status 查同步 + 读预警清单 → 汇总简报
-  3. 落盘 briefs/<日期>.md; 加 --push 且配置了钉钉webhook则顺带推送
+  3. 落盘 briefs/<YYYY-MM>/<日期>.md(按月归档); 加 --push 且配置了钉钉webhook则顺带推送
 
 **一天只产出一份文档**(2026-10-19 用户要求"晨检和午后做成一份, 方便管理"):
-  - 12 点前: 写 `briefs/<日期>.md` 的「晨检」段(完整六节快照);
+  - 12 点前: 写 `briefs/<YYYY-MM>/<日期>.md` 的「晨检」段(完整六节快照);
   - 12 点后: 读当天文档里的晨检段当基线, **只生成相对晨检的变化**, 追加
     「午后更新」段; 重跑会替换午后段而不是再写一份, 不会出现两天的重复文件。
   旧版的 `briefs/<日期>_pm.md` 不再生成(历史文件保留)。
@@ -38,6 +38,32 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import agentcore as core  # noqa: E402
+
+
+# ---------- 落盘布局: 按月份归档(2026-10-22) ----------
+#   briefs/2026-10/2026-10-22.md
+# 之前是扁平 briefs/<日期>.md, 两个月就 35 个文件混着 task.log 和旧版 _pm.md。
+# 归档后按月分目录, task.log 仍留在 briefs/ 顶层(run_brief.bat 重定向到它, 别动)。
+BRIEF_DIR = HERE / "briefs"
+
+
+def month_of(date_str: str) -> str:
+    """"2026-10-22" → "2026-10"."""
+    return date_str[:7]
+
+
+def brief_path(date_str: str, base: Path | None = None) -> Path:
+    """当天文档的规范路径 briefs/<YYYY-MM>/<YYYY-MM-DD>.md(不保证存在)."""
+    return (base or BRIEF_DIR) / month_of(date_str) / f"{date_str}.md"
+
+
+def find_brief(date_str: str, base: Path | None = None) -> Path | None:
+    """按新布局找当天文档; 找不到再看扁平旧布局(兼容未归档的历史文件)."""
+    p = brief_path(date_str, base)
+    if p.exists():
+        return p
+    flat = (base or BRIEF_DIR) / f"{date_str}.md"
+    return flat if flat.exists() else None
 
 
 # 简报正文下限(字符): 模板要求 280~480 字, 低于此视为被限流掐空, 不值得推送
@@ -577,7 +603,7 @@ def compose_daily(today: str, *, am_body: str = "", pm_body: str = "",
                   am_usage: str = "", pm_usage: str = "",
                   am_label: str = "晨检 09:30",
                   pm_label: str = "午后更新") -> str:
-    """把晨检/午后拼成当天唯一的 briefs/<日期>.md。
+    """把晨检/午后拼成当天唯一的 briefs/<YYYY-MM>/<日期>.md。
 
     只有晨检 → 只写晨检段; 午后再跑 → 晨检段原样保留(只重排格式) + 追加午后段;
     重跑午后 → 替换午后段, 不会在同一份文档里叠出两段。
@@ -746,12 +772,21 @@ def main():
     pm, suffix = resolve_run_slot(args.pm, args.am, now)
     pm_tag = " · PM" if pm else ""      # 午后的显式标记(标题/推送都用它, 方便机器 grep)
 
-    brief_dir = HERE / "briefs"
-    brief_dir.mkdir(exist_ok=True)
-    day_file = brief_dir / f"{today}.md"
+    day_file = brief_path(today)
+    day_file.parent.mkdir(parents=True, exist_ok=True)
 
     # 午后先看当天文档里有没有可用的晨检快照: 有就只写增量, 没有就补一份完整版
-    morning, am_label = (load_morning(day_file) if pm else ("", "晨检"))
+    # (find_brief 兼容未归档的扁平旧文件, 保证归档切换当天也能接上晨检基线)
+    prev = find_brief(today)
+    if prev and prev != day_file:      # 归档切换过渡: 把平铺的当天文件搬进月目录, 免得出现两份
+        try:
+            day_file.parent.mkdir(parents=True, exist_ok=True)
+            prev.replace(day_file)
+            print(f"[归档] 当天文件搬入月目录: {prev.name} → {month_of(today)}/")
+            prev = day_file
+        except OSError as e:
+            print(f"[归档] 搬迁跳过({e}), 本次仍读 {prev.name}")
+    morning, am_label = (load_morning(prev) if pm and prev else ("", "晨检"))
     delta = pm and len(morning.strip()) >= BRIEF_MIN_CHARS
     if pm:
         tag = "午后更新" if delta else "午后补全"

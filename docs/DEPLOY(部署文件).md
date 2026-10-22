@@ -22,7 +22,7 @@
 |---|---|---|
 | Python | **≥ 3.10**（本机实测 3.14） | 代码用了 `str \| None` 等 3.10 语法 |
 | 时区 | **Asia/Shanghai** | `今日动态`/`最近一月新增`/停滞天数全按本地日期算，时区错 = 数字全错 |
-| 磁盘 | Agent 目录整体**可写** | `sessions/`、`briefs/`、`agent.db`、`kb_cache/` 都写在代码同目录 |
+| 磁盘 | Agent 目录整体**可写** | `sessions/`、`briefs/`（按月份子目录）、`agent.db`、`kb_cache/` 都写在代码同目录 |
 | 出网 | LLM API 域名 + `oapi.dingtalk.com` | 推送走 HTTPS 直连；有代理的服务器见 §7 |
 
 时区验证（部署第一步就做）：
@@ -133,7 +133,7 @@ cfg=core.load_config(); core.set_root(cfg['workmain_root'])
 reg=core.build_registry(); core.load_plugins(reg,cfg)
 print(reg._tools['scan_sync_data'].func(line='手机膜')[:300])"
 
-# 4. 手动跑一次简报(不带 --push, 不惊动钉钉): 看 briefs/<今天>.md 是否生成、六节是否齐全
+# 4. 手动跑一次简报(不带 --push, 不惊动钉钉): 看 briefs/<本月>/<今天>.md 是否生成、六节是否齐全
 python daily_brief.py
 
 # 5. 带推送跑一次: 钉钉群应收到消息
@@ -143,7 +143,7 @@ python daily_brief.py --push
 tail briefs/task.log        # 应见 "[晨检简报] 推送成功: 已发送"
 ```
 
-第 4 步的常见失败：`briefs/` 没产物 + task.log 出现 `HTTP 429` → 看错误码：`1309` 套餐过期（换标准端点/充值）、`1302/1305` 限流（配 `model_fallbacks`，重试链会自动扛）。
+第 4 步的常见失败：`briefs/<本月>/` 没产物 + task.log 出现 `HTTP 429` → 看错误码：`1309` 套餐过期（换标准端点/充值）、`1302/1305` 限流（配 `model_fallbacks`，重试链会自动扛）。
 
 ## 7. 常见坑（全部真实踩过）
 

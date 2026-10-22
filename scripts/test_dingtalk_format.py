@@ -28,6 +28,13 @@ import dingtalk_push as dp  # noqa: E402
 FAILS = []
 
 
+def _brief_file(name: str) -> Path:
+    """briefs 按月份归档(2026-10-22 起) → briefs/<YYYY-MM>/<name>; 兼容扁平旧布局。"""
+    base = HERE.parent / "briefs"
+    p = base / name[:7] / name
+    return p if p.exists() else base / name
+
+
 def check(name, cond, extra=""):
     print(("  ✓ " if cond else "  ✗ ") + name
           + (f"  [{extra}]" if extra and not cond else ""))
@@ -92,7 +99,7 @@ def test_split_never_cuts_line():
 
 def test_today_brief_not_truncated():
     print("\n[6] 今天(2026-10-20)的晨检正文不再被 1800 字截断")
-    f = HERE.parent / "briefs" / "2026-10-20.md"
+    f = _brief_file("2026-10-20.md")
     if not f.exists():
         check("简报文件存在", False, str(f))
         return
