@@ -950,8 +950,11 @@ def main():
     if delta:
         task = PM_TEMPLATE.format(date=today, hhmm=hhmm, baseline=morning)
         min_chars = PM_MIN_CHARS
-        hint = ("工具调用已全部完成。请只输出相对晨检的变化: 六个 \"## ① …\" 小节标题照抄, "
-                "每节没有变化就写 \"• 与晨检一致\", 总字数 400 以内, 不要再调用工具, "
+        prefetched = prefetch_tool_data(registry)     # 午后同样先取数, 别让模型凭基线猜
+        task += prefetch_prompt(prefetched)
+        hint = ("数据已附在提示词末尾, 直接引用即可, 不要再调用工具。"
+                "请只输出相对晨检的变化: 六个 \"## ① …\" 小节标题照抄, "
+                "每节没有变化就写 \"• 与晨检一致\", 总字数 400 以内, "
                 "不要复述任何规则原文。")
         print(f"[{tag}] 增量模式: 基线来自 {day_file.name} 的「{am_label}」段")
     else:
@@ -976,21 +979,19 @@ def main():
 
     answer = ensure_brief_answer(client, history, answer, min_len=min_chars, hint=hint)
     answer = normalize_brief_md(answer)
-    tool_out = ""
+    # 体检的"合法 SKU 白名单"要含今日动态(来自 scan_sync_data), 否则 ② 里的
+    # 真实动态会被误判成编造。白名单少一点只会多拦, 不会漏放。
+    tool_out = (prefetched.get("pipeline_alerts", "") + "\n"
+                + prefetched.get("scan_sync_data", ""))
     if not delta:
         # ③④⑤ 由工具输出确定性渲染(不经模型): 数据段从此不可能被写坏/复读/写一半。
         # 复用预取结果, 不再重复执行工具(渲染取不到就保留模型原文, 不阻断落盘)。
-        pa = prefetched.get("pipeline_alerts", "")
-        scan = prefetched.get("scan_sync_data", "")
         try:
-            answer, hit = replace_data_sections(answer, pa)
+            answer, hit = replace_data_sections(answer, prefetched.get("pipeline_alerts", ""))
             if hit:
                 print(f"[{tag}] ③④⑤ 确定性渲染: {'/'.join(hit)}")
         except Exception as e:                  # noqa: BLE001
             print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
-        # 体检的"合法 SKU 白名单"要含今日动态(来自 scan_sync_data), 否则 ② 里的
-        # 真实动态会被误判成编造。白名单少一点只会多拦, 不会漏放。
-        tool_out = pa + "\n" + scan
     probs = brief_health(answer, tool_out or None)
     if probs:
         print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 重生成一次")
@@ -1017,7 +1018,7 @@ def main():
         if dropped:
             print(f"[{tag}] 过滤 {dropped} 条 ④⑤ 的 SKU 明细(午后只报计数, 明细见晨检段)")
         try:
-            now_counts = parse_counts(registry.execute("pipeline_alerts", {}))
+            now_counts = parse_counts(prefetched.get("pipeline_alerts", ""))
             if now_counts.get("over") is not None or now_counts.get("warn") is not None:
                 answer = apply_counts(answer, now_counts, parse_counts(morning))
                 print(f"[{tag}] ④⑤ 计数按工具校正: 临期 {now_counts.get('warn')} / "
