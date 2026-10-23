@@ -380,6 +380,39 @@ def test_brief_health_signals():
           extra=str(db.brief_health(clean)))
 
 
+def test_health_detects_fabricated_skus():
+    """2026-10-23 事故: 模型零工具调用, ② 编出三条"今日动态"。
+
+    真实情况是 scan_sync_data 报"今日有动态: 0 单"、Part9 待办是 G598~G601,
+    模型却写了 G531/532/533(真实存在, 但是 2026-03-02 就已结束的老单),
+    还配了"张三/李四/王五"等虚构人名。体检必须抓出来。
+    """
+    tool_out = ("数据截至(最新更新时间): 2026-10-22 17:39\n"
+                "今日有动态: 0 单\n"
+                "== Part9新单待办(创建≤7天且审批中, 2单) ==\n"
+                "  G598 Xiaomi Redmi 17 4G/5G (创建 10-22 14:53, 当前负责人: 胡浩明)\n"
+                "  G599 vivo X500 Pro 5G (创建 10-19 17:03, 当前负责人: 胡浩明)\n")
+    fake = ("## ② 今日动态\n"
+            "• SKU G531 · 在Part1(素材加工) · 审批状态：审批中 · 当前负责人：李四\n"
+            "• SKU G532 · 在Part2(广告投放) · 审批状态：审批中 · 当前负责人：赵六\n"
+            "\n## ③ 新增SKU与签样追踪\n"
+            "• G598 Xiaomi Redmi 17 4G/5G (创建 09-16)\n")
+    probs = db.brief_health(fake, tool_out)
+    joined = " ".join(probs)
+    check("编造检测: 抓到工具输出里没有的 SKU", "疑似编造" in joined, extra=joined)
+    check("编造检测: 点出 G531", "G531" in joined, extra=joined)
+    check("编造检测: 不冤枉 ③ 里的真实 SKU(只看②)", "G598" not in joined, extra=joined)
+
+    ok = ("## ② 今日动态\n"
+          "• 今日无新增动态\n"
+          "• G598 Xiaomi Redmi 17 4G/5G (创建 10-22 14:53, 当前负责人: 胡浩明)\n"
+          "\n## ③ 新增SKU与签样追踪\n")
+    check("编造检测: 照抄工具的真实条目零问题", db.brief_health(ok, tool_out) == [],
+          extra=str(db.brief_health(ok, tool_out)))
+    check("编造检测: 不给工具输出时不判(无从比对)",
+          "疑似编造" not in " ".join(db.brief_health(fake)))
+
+
 _TOOL_OUT = """目录: data/手机膜/手机膜  口径: 全流程线 空运60/海运69(权威表)
 数据截至(最新更新时间): 2026-10-21 17:49
 
@@ -402,6 +435,72 @@ _TOOL_OUT = """目录: data/手机膜/手机膜  口径: 全流程线 空运60/�
 == Part9新单待办(创建≤7天且审批中, 3单; 悬挂旧单不在此列) ==
   G600 Xiaomi 18 Pro 5G (创建 10-16 11:23, 当前负责人: 胡浩明)
 """
+
+
+def test_render_dynamic_section():
+    """② 的兜底渲染: 模型编造时按工具输出重建(2026-10-23 事故)。
+
+    夹具刻意按真实顺序拼接(pipeline_alerts 在前、scan_sync_data 在后),
+    复现"scan 的缩进行被归到最后一个 == 段"这个串味场景。
+    """
+    pa = ("数据截至(最新更新时间): 2026-10-22 17:39\n"
+          "== 环节停滞超目标(段级口径, 5单) TOP ==\n"
+          "  G493 Part6 停滞116天/目标13天 (超103天)\n"
+          "\n== Part9新单待办(创建≤7天且审批中, 2单; 悬挂旧单不在此列) ==\n"
+          "  G600 Xiaomi 18 Pro 5G (创建 10-16 11:23, 当前负责人: 胡浩明)\n"
+          "  G599 vivo X500 Pro 5G (创建 10-19 17:03, 当前负责人: 胡浩明)\n")
+    scan0 = ("今日有动态: 0 单\n"
+             "停滞≥7天且未完结: 1106 单\n"
+             "近120天内停滞TOP:\n"
+             "  G549 Part9 停滞119天 (状态:审批中, 最后更新:2026-06-25 10:25)\n")
+    out = db.render_dynamic_section(pa + "\n" + scan0)
+    check("动态渲染: 0 单写今日无新增动态", "今日无新增动态" in out, extra=str(out))
+    check("动态渲染: Part9 计数只算 2 单",
+          "Part9新单待办 2 单" in out and "G600" in out and "G599" in out, extra=str(out))
+    check("动态渲染: 停滞段没串进 Part9", "G549" not in out, extra=str(out))
+
+    scan_n = ("今日有动态: 1 单(明细如下)\n"
+              "  · G598 Xiaomi Redmi 17 4G/5G @ Part8 | 状态:审批中 | "
+              "最新节点: 胡浩明|签样确认|2026-10-22 14:53 | 当前负责人:胡浩明\n")
+    out2 = db.render_dynamic_section(pa + "\n" + scan_n)
+    check("动态渲染: 有明细时逐条照抄",
+          "• G598 Xiaomi Redmi 17 4G/5G @ Part8" in out2 and "今日无新增动态" not in out2,
+          extra=str(out2))
+    check("动态渲染: 不是这套工具输出时返回 None",
+          db.render_dynamic_section("随便一段没有今日动态字样的文本") is None)
+
+    md = ("## ② 今日动态\n\n"
+          "• SKU G531 · 在Part1(素材加工) · 当前负责人：李四\n\n"
+          "## ③ 新增SKU与签样追踪\n\n• G598 …\n")
+    new, ok = db.replace_dynamic_section(md, pa + "\n" + scan0)
+    check("动态替换: 命中并替换", ok and "G531" not in new, extra=new)
+    check("动态替换: ③ 不受影响", "## ③ 新增SKU与签样追踪" in new)
+    check("动态替换: 替换后体检通过",
+          db.brief_health(new, pa + "\n" + scan0) == [],
+          extra=str(db.brief_health(new, pa + "\n" + scan0)))
+
+
+def test_drop_ghost_action_items():
+    """⑥ 顺着编造的 ② 写出的行动建议, 按 SKU 白名单删掉。"""
+    tool_out = "  G598 Xiaomi Redmi 17 4G/5G (创建 09-16)\n  G600 Xiaomi 18 Pro 5G\n"
+    md = ("## ⑥ 行动建议\n\n"
+          "• 立即跟进Part1中G531的审批进度，确保今日完成素材加工审批\n"
+          "• 检查Part2中G532的广告投放审批状态\n"
+          "• 跟踪 G598 的签样进度\n")
+    new, n = db.drop_ghost_skus(md, tool_out)
+    check("⑥ 清理: 删掉 2 条假 SKU 建议", n == 2, extra=str(n))
+    check("⑥ 清理: G531/G532 消失", "G531" not in new and "G532" not in new, extra=new)
+    check("⑥ 清理: 真实 SKU 的建议保留", "G598" in new, extra=new)
+
+    all_fake = ("## ⑥ 行动建议\n\n• 提醒钱七处理 G533 的待审批事项\n")
+    new2, n2 = db.drop_ghost_skus(all_fake, tool_out)
+    check("⑥ 清理: 全删空时给兜底文案",
+          n2 == 1 and "详见 ③④⑤" in new2, extra=new2)
+
+    md6 = ("## ② 今日动态\n\n• 今日无新增动态\n\n"
+           "## ⑥ 行动建议\n\n• 提醒钱七处理 G533\n")
+    probs = " ".join(db.brief_health(md6, tool_out))
+    check("⑥ 体检: 抓到假 SKU", "⑥ 含工具输出里没有的 SKU" in probs, extra=probs)
 
 
 def test_render_data_sections():
@@ -492,7 +591,9 @@ def main():
                test_resolve_run_slot_clock_fallback, test_pm_label_carries_tag,
                test_scrub_echo_line_dropped, test_scrub_midline_injection,
                test_scrub_consecutive_repeats, test_duplicate_section_header_collapsed,
-               test_brief_health_signals, test_render_data_sections,
+               test_brief_health_signals,                test_health_detects_fabricated_skus, test_render_dynamic_section,
+               test_drop_ghost_action_items,
+               test_render_data_sections,
                test_replace_data_sections_overrides_garbage,
                test_replace_data_sections_inserts_missing,
                test_archive_layout_by_month):

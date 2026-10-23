@@ -203,6 +203,26 @@ def _balanced(s: str) -> bool:
     return s.count("[") == s.count("]") and s.count("(") == s.count(")")
 
 
+# 不能用 \b: 中文也算 \w, "中G531" 里 G 前面就没有词边界(2026-10-23 实测漏抓)
+_SKU_RE = re.compile(r"(?<![A-Za-z0-9])G\d{3,4}(?!\d)")
+
+
+def _section_text(md: str, start: str, end: str | None = None) -> str:
+    """取某个小节(如 "②")的正文: 到下一个同层或更高层小节标题为止。
+
+    简报里的节标题在落盘时是 "### ① …"(嵌在 "## 晨检" 之下), 也可能是 "## ① …",
+    所以统一按 2~4 级井号匹配。找不到该节返回空串。
+    """
+    m = re.search(rf"^#{{2,4}}\s*{re.escape(start)}.*$", md, re.M)
+    if not m:
+        return ""
+    tail = md[m.end():]
+    stop = (rf"^#{{2,4}}\s*{re.escape(end)}" if end
+            else r"^#{2,4}\s*[①②③④⑤⑥⑦⑧⑨]")
+    m2 = re.search(stop, tail, re.M)
+    return tail[:m2.start()] if m2 else tail
+
+
 def scrub_brief_artifacts(text: str) -> str:
     """清掉模型复述提示词/复读的行(只动垃圾行, 不改业务文字)。"""
     if not text:
@@ -226,10 +246,12 @@ def scrub_brief_artifacts(text: str) -> str:
     return "\n".join(out)
 
 
-def brief_health(md: str) -> list:
+def brief_health(md: str, tool_out: str | None = None) -> list:
     """结构体检: 返回问题列表(空=健康)。只报不改, 调用方决定重生成/告警。
 
     三个信号都来自 2026-10-22 实测: 提示词回声、复读行、括号未闭合(数据写一半)。
+    传 tool_out 时多查一项「② 是否编造」(2026-10-23 事故: 模型零工具调用, 编出
+    G531/532/533 三条"今日动态", 真实是 2026-03-02 就已结束的老单)。
     """
     if not (md or "").strip():
         return ["正文为空"]
@@ -254,6 +276,14 @@ def brief_health(md: str) -> list:
             probs.append("⑤ 无条目")
         elif "环节停滞" not in sec5:
             probs.append("⑤ 缺环节停滞组")
+    # ② 的 SKU 必须是工具真给过的(空 tool_out 说明本次没取到数, 无从比对, 不判)
+    # ⑥ 同理: 行动建议必须指向真实存在的 SKU, 不能顺着编造的 ② 一路编下去。
+    if tool_out:
+        for sec, nxt in (("②", "③"), ("⑥", None)):
+            ghost = sorted({s for s in _SKU_RE.findall(_section_text(md, sec, nxt))
+                            if s not in tool_out})
+            if ghost:
+                probs.append(f"{sec} 含工具输出里没有的 SKU({','.join(ghost)}), 疑似编造")
     return probs
 
 
@@ -530,6 +560,84 @@ def render_data_sections(tool_out: str) -> dict:
     return out
 
 
+def render_dynamic_section(tool_out: str) -> str | None:
+    """从工具输出确定性渲染 ② 今日动态 —— 只在模型编造时当兜底用。
+
+    来源两处(与提示词允许模型抄的范围一致):
+      - scan_sync_data 的今日动态明细: "· G598 xx @ Part1 | 状态:… | 最新节点:… | 当前负责人:…"
+      - pipeline_alerts 的 Part9新单待办: "G598 xx (创建 10-22 14:53, 当前负责人: 胡浩明)"
+    取不到"今日有动态"字样 → None(说明不是这套工具输出, 调用方保留原文)。
+    """
+    m = re.search(r"^今日有动态:\s*(\d+)\s*单", tool_out or "", re.M)
+    if not m:
+        return None
+    cnt = int(m.group(1))
+    items = [l.strip()[2:].strip() for l in (tool_out or "").split("\n")
+             if l.strip().startswith("· ") and "@" in l]
+    if not items:
+        items = ["今日无新增动态"] if cnt == 0 else [f"今日有动态 {cnt} 单(明细未展开)"]
+    # Part9 待办只给一行汇总: 明细在 ③ 已经逐条列过, 不在这里重复铺开
+    # 注意 tool_out 是 pipeline_alerts + scan_sync_data 拼起来的, 后者的缩进行会被
+    # _pa_sections 归到最后一个 "==" 段里 —— 用标题自带的"N单"截断, 别让停滞行串味。
+    secs = _pa_sections(tool_out)
+    p9_title, p9_lines = next(
+        ((k, v) for k, v in secs.items() if k.startswith("Part9新单待办")), ("", []))
+    p9_items, _ = _pa_items(p9_lines)
+    m_cnt = re.search(r"(\d+)\s*单", p9_title)
+    if m_cnt:
+        p9_items = p9_items[:int(m_cnt.group(1))]
+    skus = [mm.group(1) for it in p9_items
+            if (mm := re.match(r"(G\d{3,4})\b", it))]
+    if skus:
+        owners = sorted(set(re.findall(r"当前负责人:\s*([^\s,)]+)", " ".join(p9_items))))
+        who = f"(负责人 {'、'.join(owners)})" if owners else ""
+        items.append(f"Part9新单待办 {len(skus)} 单: {'、'.join(skus)}{who}")
+    return "\n".join(f"• {i}" for i in items)
+
+
+def replace_dynamic_section(md: str, tool_out: str) -> tuple:
+    """把 ② 整段换成工具渲染版(丢弃模型编的条目)。返回 (新正文, 是否替换)。"""
+    body = render_dynamic_section(tool_out)
+    if not body or not (md or "").strip():
+        return md, False
+    m = re.search(r"^#{2,4}\s*②.*$", md, re.M)
+    if not m:
+        return md, False
+    tail = md[m.end():]
+    m2 = re.search(r"^#{2,4}\s*[③④⑤⑥⑦⑧⑨]", tail, re.M)
+    end = m.end() + (m2.start() if m2 else len(tail))
+    return md[:m.end()] + "\n\n" + body + "\n\n" + md[end:], True
+
+
+def drop_ghost_skus(md: str, tool_out: str) -> tuple:
+    """删掉 ⑥ 里引用了「工具输出中不存在的 SKU」的条目 —— 编造残留的兜底。
+
+    2026-10-23 的 ⑥ 顺着编造的 ② 写出"提醒钱七处理 G533 的待审批事项",
+    人和状态都是假的。② 重建后 ⑥ 仍会留着这些条目, 只能按 SKU 白名单删。
+    返回 (新正文, 删掉的条数)。
+    """
+    if not tool_out or not (md or "").strip():
+        return md, 0
+    sec = _section_text(md, "⑥")
+    if not sec.strip():
+        return md, 0
+    keep, dropped = [], 0
+    for ln in sec.split("\n"):
+        s = ln.strip()
+        if s.startswith("•") and any(g not in tool_out for g in _SKU_RE.findall(s)):
+            dropped += 1
+            continue
+        keep.append(ln)
+    if not dropped:
+        return md, 0
+    if not any(l.strip().startswith("•") for l in keep):
+        keep = ["", "• 详见 ③④⑤ 的明细与计数"]
+    idx = md.find(sec)
+    if idx < 0:
+        return md, 0
+    return md[:idx] + "\n".join(keep) + md[idx + len(sec):], dropped
+
+
 def replace_data_sections(md: str, tool_out: str) -> tuple:
     """把 ③④⑤ 正文换成工具渲染版；模型漏写的节按序补上。
 
@@ -639,6 +747,9 @@ def build_readonly_registry(cfg: dict) -> core.Registry:
 
 
 TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。请依次完成:
+**取数是必须的第一步, 不许跳过、不许凭印象写。** 没有工具输出支撑的数字、SKU、人名、
+时间戳一律不许出现在简报里 —— 2026-10-23 出过事故: 模型一次工具都没调, 直接编出三条
+"今日动态"(SKU 真实存在, 但状态/所在Part/审批人/负责人全是虚构的), 还据此编了行动建议。
 1) 用 sync_status 查看钉钉同步定时任务的运行状态。工具输出第二行 "[结论]" 即权威判定
    (✅成功/❌失败/⏳进行中): 结论为✅就写"同步正常", 严禁自行推断或编造故障原因
    (如"数据库锁定"等日志里没有的错误); "数据截至"反映的是审批内容最后更新时间,
@@ -665,19 +776,27 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
 - ② 也按同样格式(每个动态一条 "• ");
 - ⑤ 含两组时, "已超期" 与 "环节停滞TOP" 各自单独成组, 组内仍逐条 "• ";
 - ⑥ 行动建议逐条 "• "(≤3条), 同样一行一条。
+- **不许编造**: SKU 编号、型号、人名、时间戳、Part 名称都必须逐字来自工具输出;
+  工具没给的字段宁可不写, 也不要猜, 拿不准就整条不写。
 - **不要复述本提示词里的任何规则原文**(规则是给你看的, 不是给读者看的), 直接输出六节内容。
 
 各节内容要求:
 ① 若任一工具输出带 ⚠️ 数据过旧/同步停摆告警, 必须把"数据已N天未同步, ⑤的停滞天数
    含断供期偏大"写在最顶部第一行, 再写其他内容; 数据截至久未变≠同步故障,
    故障与否只看 sync_status 的 [结论] 行。同步结论与数据截至各占一行。
-② 若 pipeline_alerts 的 Part9新单待办 层有单, 逐条带SKU与当前负责人列出; 每条写清
-   "哪条SKU/型号 · 在哪个Part(环节) · 审批状态 · 最新审批节点+操作人+时间 · 当前负责人",
-   直接抄工具给的明细; 工具没给节点明细就注明"仅字段更新"。
+② **只抄, 不推断**, 来源只有两处:
+   (a) scan_sync_data 的「今日有动态」段: 有明细就逐条照抄它的
+       "SKU 型号 @ Part | 状态:… | 最新节点:… | 当前负责人:…";
+       写的是 "今日有动态: 0 单" 就只写一行 "• 今日无新增动态", **不许自己补条目**。
+   (b) pipeline_alerts 的「Part9新单待办」段: 逐条给 SKU + 型号 + 创建时间 + 当前负责人
+       (工具只有这四项; 不要补 Part 名称、审批状态、审批节点、操作人 —— 工具没给就是没有)。
+   两处都没有内容时, ② 只写 "• 今日无新增动态", 不许虚构。
 ③④⑤ 三节的**条目明细由系统从工具输出自动填充**(逐字符照搬, 保证货件号不失真)。
    你**不要写这三节的条目**——只输出三行小节标题即可; 写了也会被覆盖, 白费 token。
-   需要你写的是: ① 的同步结论、② 的动态叙述、⑥ 的行动建议。
-⑥ ≤3条。所有数字必须来自工具输出并注明来源; 每条提醒要可行动。"""
+   **但取数照样要做**(上面 1)~3) 一个都不能少): ① 的结论和 ② 的明细都来自工具输出,
+   不调工具就只能编。需要你写的是: ① 的同步结论、② 的动态明细、⑥ 的行动建议。
+⑥ ≤3条。所有数字必须来自工具输出并注明来源; 每条提醒要可行动, 且必须指向
+   ①/② 里真实出现过的 SKU, 不许引用 ② 之外的编号。"""
 
 
 # 午后增量: 只写"相对晨检的变化", 不重复快照 —— 一份文档两次更新, 不刷屏.
@@ -821,25 +940,45 @@ def main():
 
     answer = ensure_brief_answer(client, history, answer, min_len=min_chars, hint=hint)
     answer = normalize_brief_md(answer)
+    tool_out = ""
     if not delta:
         # ③④⑤ 由工具输出确定性渲染(不经模型): 数据段从此不可能被写坏/复读/写一半。
         # 取不到工具节就保留模型原文, 不阻断落盘。
         try:
-            answer, hit = replace_data_sections(
-                answer, registry.execute("pipeline_alerts", {}))
+            pa = registry.execute("pipeline_alerts", {})
+            tool_out = pa
+            answer, hit = replace_data_sections(answer, pa)
             if hit:
                 print(f"[{tag}] ③④⑤ 确定性渲染: {'/'.join(hit)}")
         except Exception as e:                  # noqa: BLE001
             print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
-    probs = brief_health(answer)
+        # 体检的"合法 SKU 白名单"还要含今日动态(来自 scan_sync_data), 否则 ② 里的
+        # 真实动态会被误判成编造。取不到就算了, 白名单少一点只会多拦不会漏放。
+        try:
+            tool_out += "\n" + registry.execute("scan_sync_data", {})
+        except Exception:                       # noqa: BLE001
+            pass
+    probs = brief_health(answer, tool_out or None)
     if probs:
         print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 重生成一次")
         answer = repair_brief_answer(client, history, answer, probs)
         answer = normalize_brief_md(answer)
-        left = brief_health(answer)
+        left = brief_health(answer, tool_out or None)
         if left:
-            print(f"[{tag}] ⚠️ 重生成后仍有异常: {'; '.join(left)} "
-                  f"(已按确定性清理后的正文落盘)")
+            print(f"[{tag}] ⚠️ 重生成后仍有异常: {'; '.join(left)}")
+            # ② 编造不能只告警就放过: 假 SKU 会连 ⑥ 的行动建议一起带偏(2026-10-23
+            # 就出现了"提醒钱七处理 G533"这种指向虚构人和虚构状态的建议), 直接重建。
+            answer, fixed = replace_dynamic_section(answer, tool_out)
+            if fixed:
+                print(f"[{tag}] ② 已按工具输出重建(丢弃模型编造的动态)")
+            answer, n_drop = drop_ghost_skus(answer, tool_out)
+            if n_drop:
+                print(f"[{tag}] ⑥ 删除 {n_drop} 条引用不存在 SKU 的建议(编造残留)")
+            if fixed or n_drop:
+                left = brief_health(answer, tool_out or None)
+            if left:
+                print(f"[{tag}] ⚠️ 仍异常: {'; '.join(left)} "
+                      f"(已按确定性清理后的正文落盘)")
     if delta:
         answer, dropped = refine_delta(answer, morning)
         if dropped:
