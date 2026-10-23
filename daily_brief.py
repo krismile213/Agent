@@ -746,19 +746,52 @@ def build_readonly_registry(cfg: dict) -> core.Registry:
     return reg
 
 
-TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。请依次完成:
-**取数是必须的第一步, 不许跳过、不许凭印象写。** 没有工具输出支撑的数字、SKU、人名、
-时间戳一律不许出现在简报里 —— 2026-10-23 出过事故: 模型一次工具都没调, 直接编出三条
-"今日动态"(SKU 真实存在, 但状态/所在Part/审批人/负责人全是虚构的), 还据此编了行动建议。
-1) 用 sync_status 查看钉钉同步定时任务的运行状态。工具输出第二行 "[结论]" 即权威判定
+PREFETCH_TOOLS = ("sync_status", "scan_sync_data", "pipeline_alerts")
+
+
+def prefetch_tool_data(registry) -> dict:
+    """预先执行只读工具, 把实时数据直接交给模型。
+
+    为什么不让模型自己调: 2026-10-23 实测, glm-4.5-flash 在"③④⑤ 不用你写条目"
+    的提示下会整段跳过取数(1 次 LLM 调用、0 次工具调用), 直接编出三条"今日动态"。
+    否定式指令压过了"必须取数", 靠提示词不可靠 —— 代码先取好塞给它最稳。
+    """
+    data = {}
+    for name in PREFETCH_TOOLS:
+        try:
+            data[name] = registry.execute(name, {})
+        except Exception as e:                  # noqa: BLE001
+            data[name] = f"[取数失败: {e}]"
+            print(f"[预取] {name} 失败: {e}")
+    return data
+
+
+def prefetch_prompt(data: dict) -> str:
+    """把预取结果拼成提示词片段(接在任务说明之后)。"""
+    if not data:
+        return ""
+    head = ("\n\n**以下实时数据已由系统取好, 直接引用即可 —— 不需要你再调用 "
+            "sync_status / scan_sync_data / pipeline_alerts。**"
+            "要查单个 SKU 的路线明细可以调 query_sku_route。\n")
+    return head + "".join(f"\n### {k} 输出\n{v}\n" for k, v in data.items())
+
+
+TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。
+**实时数据已由系统取好, 附在本提示词末尾的 "### xxx 输出" 里, 直接引用即可, 不要重复调工具。**
+**没有数据支撑的数字、SKU、人名、时间戳一律不许写** —— 2026-10-23 出过事故: 模型一次
+工具都没调, 直接编出三条"今日动态"(SKU 真实存在, 但状态/所在Part/审批人/负责人全是
+虚构的), 还据此编了行动建议。
+
+各数据源口径(数据已在末尾):
+1) sync_status: 钉钉同步定时任务的运行状态。其输出第二行 "[结论]" 即权威判定
    (✅成功/❌失败/⏳进行中): 结论为✅就写"同步正常", 严禁自行推断或编造故障原因
    (如"数据库锁定"等日志里没有的错误); "数据截至"反映的是审批内容最后更新时间,
    周末/节假日无审批时数据截至会自然停在上一场, 这不等于同步故障。
-2) 用 scan_sync_data 实时扫描: 状态分布 / 数据截至时间 / 今日有动态明细(含所在Part)。
-3) 用 pipeline_alerts 获取五层信号: 最近40天新增SKU(滚动40天, 含签样追踪) /
+2) scan_sync_data: 状态分布 / 数据截至时间 / 今日有动态明细(含所在Part)。
+3) pipeline_alerts: 五层信号 —— 最近40天新增SKU(滚动40天, 含签样追踪) /
    全流程临期(空运60·海运69) / 已超期 / 环节停滞超目标(近似段级) / Part9新单待办(创建≤7天且审批中)。
-4) 用 read_file 读取 流程复盘/output/预警_加急SKU.md 的前40行(不存在就跳过),
-   仅作背景补充 —— 必须注明它是旧批次产物, 与实时数据冲突时以实时为准。
+4) 流程复盘/output/预警_加急SKU.md 是旧批次产物, 仅作背景补充(要读可调 read_file 取前40行);
+   与实时数据冲突时以实时为准。
 输出中文markdown简报(约500~1000字)。大标题由外层代码统一加, **你不要写大标题行**。
 
 六节标题**照抄下面这六行短标题**(不要加括号说明、不要改写、不要另起名称):
@@ -913,6 +946,7 @@ def main():
         tag = "晨检"
         am_label = f"晨检 {hhmm}"
 
+    prefetched = {}
     if delta:
         task = PM_TEMPLATE.format(date=today, hhmm=hhmm, baseline=morning)
         min_chars = PM_MIN_CHARS
@@ -924,6 +958,8 @@ def main():
         task = TASK_TEMPLATE.format(date=today, tag=tag)
         min_chars = BRIEF_MIN_CHARS
         hint = ""
+        prefetched = prefetch_tool_data(registry)     # 代码取好数, 不指望模型自觉
+        task += prefetch_prompt(prefetched)
         if pm:
             print(f"[{tag}] 当天无可用晨检快照, 本次按完整六节生成并落同一份文档")
 
@@ -943,21 +979,18 @@ def main():
     tool_out = ""
     if not delta:
         # ③④⑤ 由工具输出确定性渲染(不经模型): 数据段从此不可能被写坏/复读/写一半。
-        # 取不到工具节就保留模型原文, 不阻断落盘。
+        # 复用预取结果, 不再重复执行工具(渲染取不到就保留模型原文, 不阻断落盘)。
+        pa = prefetched.get("pipeline_alerts", "")
+        scan = prefetched.get("scan_sync_data", "")
         try:
-            pa = registry.execute("pipeline_alerts", {})
-            tool_out = pa
             answer, hit = replace_data_sections(answer, pa)
             if hit:
                 print(f"[{tag}] ③④⑤ 确定性渲染: {'/'.join(hit)}")
         except Exception as e:                  # noqa: BLE001
             print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
-        # 体检的"合法 SKU 白名单"还要含今日动态(来自 scan_sync_data), 否则 ② 里的
-        # 真实动态会被误判成编造。取不到就算了, 白名单少一点只会多拦不会漏放。
-        try:
-            tool_out += "\n" + registry.execute("scan_sync_data", {})
-        except Exception:                       # noqa: BLE001
-            pass
+        # 体检的"合法 SKU 白名单"要含今日动态(来自 scan_sync_data), 否则 ② 里的
+        # 真实动态会被误判成编造。白名单少一点只会多拦, 不会漏放。
+        tool_out = pa + "\n" + scan
     probs = brief_health(answer, tool_out or None)
     if probs:
         print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 重生成一次")
