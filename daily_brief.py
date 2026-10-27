@@ -638,6 +638,44 @@ def drop_ghost_skus(md: str, tool_out: str) -> tuple:
     return md[:idx] + "\n".join(keep) + md[idx + len(sec):], dropped
 
 
+def carry_over_actions(pm_md: str, am_md: str, tool_out: str) -> tuple:
+    """午后 ⑥ 必须承接晨检待办 —— 晨检提过、SKU 仍在流程里的, 没写就补回来。
+
+    2026-10-27 用户反馈: 晨检 ⑥ 要求"今日内完成 G592/G593 的 Part8 审批",
+    午后 ⑥ 却写"• 无新增动作"。上午的活没落实, 下午反而清零, 群里会误判成没事。
+    规则只能管住听话的模型, 这里按数据兜一道: 只要 SKU 还在工具输出里
+    (pipeline_alerts 只列在途/异常单), 就认定它没做完, 继续挂在 ⑥ 上。
+    返回 (新正文, 补回的条数)。
+    """
+    am_sec = _section_text(am_md or "", "⑥")
+    pm_sec = _section_text(pm_md or "", "⑥")
+    if not am_sec.strip() or not pm_sec.strip():
+        return pm_md, 0
+    am_items = [l.strip() for l in am_sec.split("\n") if l.strip().startswith("•")]
+    pm_items = [l.strip() for l in pm_sec.split("\n") if l.strip().startswith("•")]
+    pm_skus = {s for l in pm_items for s in _SKU_RE.findall(l)}
+    carry = []
+    for it in am_items:
+        skus = _SKU_RE.findall(it)
+        if not skus:
+            continue                       # 没有 SKU 的泛泛建议不承接(无法核对进展)
+        if any(s in pm_skus for s in skus):
+            continue                       # 午后已经提过, 不重复
+        if not any(s in (tool_out or "") for s in skus):
+            continue                       # 数据里查不到 → 大概率已结束, 不硬挂
+        carry.append(it.lstrip("• ").rstrip("。") + " (晨检提出, 仍未推进)")
+    if not carry:
+        return pm_md, 0
+    # "无新增动作"是清零式占位, 有承接条目时必须去掉, 否则自相矛盾
+    kept = [l for l in pm_items if "无新增动作" not in l]
+    new_sec = "\n".join(kept + [f"• {c}" for c in carry])
+    idx = (pm_md or "").find(pm_sec)
+    if idx < 0:
+        return pm_md, 0
+    # 前面必须补 "\n\n": pm_sec 自带前导换行, 直接拼会让第一条粘在标题行尾被吃掉
+    return pm_md[:idx] + "\n\n" + new_sec + pm_md[idx + len(pm_sec):], len(carry)
+
+
 def replace_data_sections(md: str, tool_out: str) -> tuple:
     """把 ③④⑤ 正文换成工具渲染版；模型漏写的节按序补上。
 
@@ -860,8 +898,14 @@ PM_TEMPLATE = """现在是当日午后更新({date} {hhmm})。今天 09:30 已�
 - **只比汇总数字, 不要拿基线列了几行当基数**(晨检列 8 行、总数 22 个, 不是"从8增至22");
 - ① 分清两个时间: "最近同步"是 sync_status 的同步完成时间, "数据截至"是审批内容最后更新时间。
   数据截至没推进就写 "• 数据截至仍为 …(未推进)", **不要拿同步时间冒充数据截至**;
-- ⑥ 只给因 ②③(新增动态/新增SKU)或 ④⑤ 总数上升而新增的动作(≤2 条), **不要写任何条数/增量数字**
-  (总数由 ④⑤ 统一给, 你按基线行数做减法会算错), 没有可写 "• 无新增动作";
+- ⑥ **必须承接晨检的待办, 不许清零**(2026-10-27 用户反馈: 晨检让"今日内完成 G592/G593
+  的 Part8 审批", 午后却写"无新增动作", 等于把上午的活悄悄撤了)。写法分两组:
+  ① 承接: 把晨检 ⑥ 的每一条对着当前数据核一遍 —— 涉及的 SKU 若仍在审批中/仍卡原环节,
+     原样保留该条并加 " (晨检提出, 仍未推进)"; 确实推进了就写 "• Gxxx 已推进到 PartX"。
+     这一组**不许因为"今天没新变化"就清空**;
+  ② 新增: 因 ②③(新增动态/新增SKU)或 ④⑤ 总数上升而新增的动作(≤2 条)。
+  两组都空才写 "• 无新增动作";
+- ⑥ 不要写任何条数/增量数字(总数由 ④⑤ 统一给, 你按基线行数做减法会算错);
 - 总字数 400 字以内, 不做背景解释、不写"总体平稳"之类套话。
 
 【晨检基线】
@@ -1025,6 +1069,10 @@ def main():
                       f"已超期 {now_counts.get('over')} / 停滞 {now_counts.get('stale')}")
         except Exception as e:                      # 取不到就用模型写的, 不影响落盘
             print(f"[{tag}] 计数校正跳过: {e}")
+        # 晨检的待办不能因为"下午没新变化"就消失(2026-10-27 用户反馈)
+        answer, n_carry = carry_over_actions(answer, morning, tool_out)
+        if n_carry:
+            print(f"[{tag}] ⑥ 承接晨检待办 {n_carry} 条(标注「晨检提出, 仍未推进」)")
     if delta and len((answer or "").strip()) > PM_DELTA_SOFT_MAX:
         print(f"[{tag}] ⚠️ 增量正文 {len(answer)} 字(> {PM_DELTA_SOFT_MAX}), "
               f"模型可能重抄了基线; 已照写, 下次留意")

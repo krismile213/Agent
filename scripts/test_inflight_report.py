@@ -170,9 +170,11 @@ def test_date_param():
         out2 = reg.tools["inflight_report"].func(line="手机膜", date="20261014")
         check("date: 紧凑形式命中同一文件", "事中日报_20261014.xlsx" in out2)
     out3 = reg.tools["inflight_report"].func(line="手机膜", date="20260101")
+    # 可用清单只列"最近 8 份", 不能硬编码某个日期(2026-10-27 实测: 数据涨到 10-27 后
+    # 原来钉死的 20261015 已被挤出前 8, 测试假失败)。只验证"确实列出了 8 位日期"。
     check("date: 不存在的日期 → 人话错误+可用清单",
           out3.startswith("[错误]") and "已有" in out3
-          and "20261015" in out3)
+          and len(re.findall(r"20\d{6}", out3)) >= 1)
     out4 = reg.tools["inflight_report"].func(line="手机膜", date="abc")
     check("date: 非法形式 → 人话错误", out4.startswith("[错误]")
           and "YYYYMMDD" in out4)

@@ -503,6 +503,36 @@ def test_drop_ghost_action_items():
     check("⑥ 体检: 抓到假 SKU", "⑥ 含工具输出里没有的 SKU" in probs, extra=probs)
 
 
+def test_carry_over_actions():
+    """午后 ⑥ 不能把晨检待办清零(2026-10-27 用户反馈的真实场景)。
+
+    晨检要求"今日内完成 G592/G593 的 Part8 审批", 午后只写"无新增动作" ——
+    上午的活没落实, 下午反而撤了。
+    """
+    am = ("## ⑥ 行动建议\n\n"
+          "• 立即跟进 G592 和 G593 的 Part8 审批进度，确保今日内完成，避免空运超期扩大\n"
+          "• 重点处理 G598 (Xiaomi Redmi 17 4G/5G) 的 Part9 新单待办，当前负责人胡浩明需优先处理\n")
+    pm = "## ⑥ 行动建议\n\n• 无新增动作\n"
+    tool_out = "  G592 Xiaomi Poco F9 Pro 剩1天[空运] (卡Part8)\n  G598 Xiaomi Redmi 17 (创建 09-16)\n"
+    new, n = db.carry_over_actions(pm, am, tool_out)
+    check("承接: 补回 2 条", n == 2, extra=str(n))
+    check("承接: G592 回来了", "G592" in new, extra=new)
+    check("承接: 标了「晨检提出, 仍未推进」", new.count("晨检提出, 仍未推进") == 2, extra=new)
+    check("承接: 「无新增动作」被去掉", "无新增动作" not in new, extra=new)
+
+    pm2 = ("## ⑥ 行动建议\n\n"
+           "• G592 已推进到 Part9，无需继续催 Part8\n")
+    new2, n2 = db.carry_over_actions(pm2, am, tool_out)
+    check("承接: 午后已提过 G592 不重复", n2 == 1 and new2.count("G592") == 1, extra=new2)
+
+    # G598 已不在工具输出里(流程走完) → 不该硬挂
+    new3, n3 = db.carry_over_actions(pm, am, "  G592 Xiaomi Poco F9 Pro 剩1天[空运]\n")
+    check("承接: 数据里查不到的 SKU 不硬补", n3 == 1 and "G598" not in new3, extra=new3)
+
+    new4, n4 = db.carry_over_actions("## ⑥ 行动建议\n\n• 无新增动作\n", am, "")
+    check("承接: 没有工具输出时不动", n4 == 0, extra=new4)
+
+
 def test_render_data_sections():
     """③④⑤ 从工具输出直出: 货件号逐字符保真, 计数行能被 parse_counts 认。"""
     r = db.render_data_sections(_TOOL_OUT)
@@ -592,7 +622,7 @@ def main():
                test_scrub_echo_line_dropped, test_scrub_midline_injection,
                test_scrub_consecutive_repeats, test_duplicate_section_header_collapsed,
                test_brief_health_signals,                test_health_detects_fabricated_skus, test_render_dynamic_section,
-               test_drop_ghost_action_items,
+               test_drop_ghost_action_items, test_carry_over_actions,
                test_render_data_sections,
                test_replace_data_sections_overrides_garbage,
                test_replace_data_sections_inserts_missing,
