@@ -248,16 +248,25 @@ def scrub_brief_artifacts(text: str) -> str:
     return "\n".join(out)
 
 
-def brief_health(md: str, tool_out: str | None = None) -> list:
+def brief_health(md: str, tool_out: str | None = None,
+                 require_all: bool = False) -> list:
     """结构体检: 返回问题列表(空=健康)。只报不改, 调用方决定重生成/告警。
 
     三个信号都来自 2026-10-22 实测: 提示词回声、复读行、括号未闭合(数据写一半)。
     传 tool_out 时多查一项「② 是否编造」(2026-10-23 事故: 模型零工具调用, 编出
     G531/532/533 三条"今日动态", 真实是 2026-03-02 就已结束的老单)。
+    require_all: 完整快照(晨检)要求六节齐全 —— 2026-10-29 实测模型只写 ①②⑥,
+    ④ 因当天"临期 0 个"被渲染逻辑跳过, 简报悄悄少一节且无人报警。午后增量
+    只写变化, 不要求六节, 所以默认关闭。
     """
     if not (md or "").strip():
         return ["正文为空"]
     probs = []
+    if require_all:
+        missing = [n for n in "①②③④⑤⑥"
+                   if not re.search(rf"^#{{2,4}}\s*{n}", md, re.M)]
+        if missing:
+            probs.append(f"缺 {'/'.join(missing)} 节")
     echo = [m for m in _ECHO_MARKS if m in md]
     if echo:
         probs.append(f"含提示词回声({echo[0]})")
@@ -477,7 +486,10 @@ def parse_counts(text: str) -> dict:
 #   直接搬, 一个字符都不经模型 —— 数据段从此不可能出错, 也省掉三节的输出 token。
 _PA_SEC = re.compile(r"^==\s*(.+?)\s*==$")
 _PA_ITEM = re.compile(r"^\s{2,}(\S.*)$")
-_SEC_SPLIT = re.compile(r"^##\s*([①②③④⑤⑥])\s*(.*)$", re.M)
+# 层级自适应: 正文落盘时整段会被降一级(## 晨检 → ### ①), 若只认 "## " 就切不开,
+# 结果是 ③④⑤ 被整节追加到文末、原文那几节还在 —— 一份简报里两套 ③④⑤。
+_SEC_SPLIT = re.compile(r"^#{2,4}\s*([①②③④⑤⑥])\s*(.*)$", re.M)
+_SEC_LEVEL = re.compile(r"^(#{2,4})\s*[①②③④⑤⑥]", re.M)
 _SEC_TITLES = {"③": "新增SKU与签样追踪", "④": "临期预警", "⑤": "已超期与环节停滞TOP"}
 
 
@@ -523,42 +535,45 @@ def render_data_sections(tool_out: str) -> dict:
                 return k, v
         return None, None
 
+    # ⚠️ 段存在就必须出节, 哪怕条目为 0 —— 2026-10-29 实测: 当天"临期预警 0 个",
+    # 旧写法 `if items` 直接跳过 ④, 简报从六节变成五节, 读者以为漏报了一节。
+    # "0 个" 本身是有效结论(今天没有临期), 要写出来, 不能靠标题消失来表达。
     out = {}
     k, v = pick("新增SKU")
     if k:
         items, notes = _pa_items(v)
-        if items:
-            out["③"] = "\n".join([f"• {i}" for i in items] + notes)
+        out["③"] = "\n".join([f"• {i}" for i in items] + notes) if items \
+            else "• 近 40 天无新增 SKU"
 
     k, v = pick("临期预警")
     if k:
         items, _ = _pa_items(v)
-        if items:
-            warn = _first_int(_CNT_WARN, k)
-            # 带计数行: 午后要靠它对数, 否则只能写"晨检未记录总数"(2026-10-20 的噪音)
-            head = [f"临期 {warn} 个"] if warn is not None else []
-            out["④"] = "\n".join(head + [f"• {i}" for i in items])
+        warn = _first_int(_CNT_WARN, k)
+        # 带计数行: 午后要靠它对数, 否则只能写"晨检未记录总数"(2026-10-20 的噪音)
+        head = [f"临期 {warn} 个"] if warn is not None else []
+        body = [f"• {i}" for i in items] or ["• 无临期 SKU"]
+        out["④"] = "\n".join(head + body)
 
     k, v = pick("已超期")
     if k:
         items, _ = _pa_items(v)
-        if items:
-            over = _first_int(_CNT_OVER, k)
-            legacy = re.search(r"另历史遗留\s*(\d+)\s*个", k)
-            head = f"已超期 {over} 个" if over is not None else "已超期"
-            if legacy:
-                head += f"; 另历史遗留 {legacy.group(1)} 个不列"
-            out["⑤"] = "\n".join([head] + [f"• {i}" for i in items])
+        over = _first_int(_CNT_OVER, k)
+        legacy = re.search(r"另历史遗留\s*(\d+)\s*个", k)
+        head = f"已超期 {over} 个" if over is not None else "已超期"
+        if legacy:
+            head += f"; 另历史遗留 {legacy.group(1)} 个不列"
+        body = [f"• {i}" for i in items] or ["• 无超期 SKU"]
+        out["⑤"] = "\n".join([head] + body)
 
     k, v = pick("环节停滞")
     if k:
         items, _ = _pa_items(v)
-        if items:
-            stale = _first_int(_CNT_STALE, k)
-            g2 = (f"环节停滞TOP {stale}单 (段级停滞=距最后更新vs环节目标)"
-                  if stale is not None else "环节停滞TOP (段级停滞=距最后更新vs环节目标)")
-            body = g2 + "\n" + "\n".join(f"• {i}" for i in items)
-            out["⑤"] = (out["⑤"] + "\n\n" + body) if out.get("⑤") else body
+        stale = _first_int(_CNT_STALE, k)
+        g2 = (f"环节停滞TOP {stale}单 (段级停滞=距最后更新vs环节目标)"
+              if stale is not None else "环节停滞TOP (段级停滞=距最后更新vs环节目标)")
+        body = g2 + "\n" + ("\n".join(f"• {i}" for i in items) if items
+                            else "• 无停滞超目标环节")
+        out["⑤"] = (out["⑤"] + "\n\n" + body) if out.get("⑤") else body
     return out
 
 
@@ -702,7 +717,10 @@ def replace_data_sections(md: str, tool_out: str) -> tuple:
                            "\n" + rendered[num].rstrip() + "\n"])
             hit.append(num)
     blocks.sort(key=lambda b: "①②③④⑤⑥".index(b[0]))
-    body = "\n".join([head.rstrip()] + [f"## {n} {t}".rstrip() + "\n" + c
+    # 沿用原文的标题层级: 落盘段落是 ### 级, 重拼成 ## 会让同一份文档里层级跳变
+    m = _SEC_LEVEL.search(md)
+    lvl = m.group(1) if m else "##"
+    body = "\n".join([head.rstrip()] + [f"{lvl} {n} {t}".rstrip() + "\n" + c
                                         for n, t, c in blocks])
     return body.strip() + "\n", hit
 
@@ -975,12 +993,12 @@ def main():
             except Exception as e:                  # noqa: BLE001
                 print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
 
-        probs = brief_health(md, tool_out or None)
+        probs = brief_health(md, tool_out or None, require_all=not delta)
         if probs:
             print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 修复一次")
             md = repair_brief_answer(client, history, md, probs)
             md = normalize_brief_md(md)
-            left = brief_health(md, tool_out or None)
+            left = brief_health(md, tool_out or None, require_all=not delta)
             if left:
                 print(f"[{tag}] ⚠️ 修复后仍有异常: {'; '.join(left)}")
                 # ② 编造不能只告警就放过: 假 SKU 会连 ⑥ 的行动建议一起带偏(2026-10-23
@@ -991,7 +1009,7 @@ def main():
                 md, n_drop = drop_ghost_skus(md, tool_out)
                 if n_drop:
                     print(f"[{tag}] ⑥ 删除 {n_drop} 条引用不存在 SKU 的建议(编造残留)")
-                remain = brief_health(md, tool_out or None)
+                remain = brief_health(md, tool_out or None, require_all=not delta)
                 if (fixed or n_drop) and remain:
                     print(f"[{tag}] ⚠️ 仍异常: {'; '.join(remain)} "
                           f"(已按确定性清理后的正文落盘)")

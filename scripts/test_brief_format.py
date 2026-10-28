@@ -584,6 +584,65 @@ def test_replace_data_sections_inserts_missing():
     check("补齐: ④ 原有内容被覆盖", "G592" in out)
 
 
+def test_render_data_sections_zero_warn():
+    """临期 0 个也必须出 ④ 节 —— 2026-10-29 实测: 当天真的没有临期,
+    旧写法 `if items` 直接跳过 ④, 简报从六节变五节, 读者以为漏报。
+    "0 个" 本身是有效结论, 要用文字表达, 不能靠标题消失。"""
+    empty_warn = _TOOL_OUT.replace(
+        "== 临期预警(剩≤15天, 6个) ==\n"
+        "  G592 Xiaomi Poco F9 Pro/Redmi K100 Pro 5G 剩2天[空运] "
+        "(启动08-25, 卡Part8) [到货: 美客多墨西哥 77739558；"
+        "亚马逊墨西哥 FBA19QR4PKLJ 共14个]\n",
+        "== 临期预警(剩≤15天, 0个) ==\n")
+    check("零临期: 段被替换掉了(前置条件)", "0个" in empty_warn)
+    r = db.render_data_sections(empty_warn)
+    check("零临期: ④ 仍然出节", "④" in r, extra=str(set(r)))
+    check("零临期: 写的是 0 个而不是省略",
+          r.get("④", "").startswith("临期 0 个"), extra=r.get("④", "")[:30])
+    check("零临期: 有条目占位(不是空节)", "• 无临期 SKU" in r.get("④", ""))
+    check("零临期: 计数可被 parse_counts 认出",
+          db.parse_counts(r.get("④", ""))["warn"] == 0)
+
+
+def test_replace_data_sections_h3_level():
+    """落盘后正文降一级(### ①): 仍要能切开、不重复、层级不跳变。"""
+    md = ("## 晨检 09:30\n\n"
+          "### ① 同步状态与数据截至\n\n• 同步正常\n\n"
+          "### ② 今日动态\n\n• 无新增\n\n"
+          "### ③ 新增SKU与签样追踪\n\n• 模型写的\n\n"
+          "### ⑤ 已超期与环节停滞TOP\n\n• 模型写的\n\n"
+          "### ⑥ 行动建议\n\n• 跟进 G592\n")
+    out, hit = db.replace_data_sections(md, _TOOL_OUT)
+    check("三级标题: ③⑤ 被替换、④ 补上", sorted(hit) == ["③", "④", "⑤"], extra=str(hit))
+    check("三级标题: ③ 只出现一次",
+          out.count("新增SKU与签样追踪") == 1, extra=str(out.count("新增SKU与签样追踪")))
+    check("三级标题: ⑤ 只出现一次",
+          out.count("已超期与环节停滞TOP") == 1, extra=str(out.count("已超期与环节停滞TOP")))
+    check("三级标题: 层级不跳变(全是 ###)",
+          [l[:3] for l in out.split("\n")
+           if l.startswith("#") and "①" <= l.lstrip("# ")[:1] <= "⑥"] == ["###"] * 6,
+          extra=str([l for l in out.split("\n") if l.startswith("#")]))
+    check("三级标题: 六节顺序正确",
+          [out.index(f"### {n}") for n in "①②③④⑤⑥"]
+          == sorted(out.index(f"### {n}") for n in "①②③④⑤⑥"))
+
+
+def test_brief_health_requires_all_sections():
+    """晨检是完整快照, 少一节必须报出来(2026-10-29 ④ 静默消失的兜底)。"""
+    full = ("## ① 同步状态与数据截至\n• 同步正常\n## ② 今日动态\n• 无新增\n"
+            "## ③ 新增SKU与签样追踪\n• G598\n## ④ 临期预警\n• 无临期 SKU\n"
+            "## ⑤ 已超期与环节停滞TOP\n• G591\n环节停滞\n## ⑥ 行动建议\n• 跟进 G592\n")
+    check("六节齐全: 不报缺节",
+          not any("缺" in p for p in db.brief_health(full, require_all=True)),
+          extra=str(db.brief_health(full, require_all=True)))
+    short = full.replace("## ④ 临期预警\n• 无临期 SKU\n", "")
+    probs = db.brief_health(short, require_all=True)
+    check("缺 ④: 报出来", any("缺 ④" in p for p in probs), extra=str(probs))
+    check("缺 ④: 默认(午后)不报 —— 增量只写变化",
+          not any("缺" in p for p in db.brief_health(short)),
+          extra=str(db.brief_health(short)))
+
+
 def test_archive_layout_by_month():
     """落盘按月归档: briefs/<YYYY-MM>/<日期>.md, 且兼容未归档的扁平旧文件。"""
     import tempfile
@@ -624,8 +683,11 @@ def main():
                test_brief_health_signals,                test_health_detects_fabricated_skus, test_render_dynamic_section,
                test_drop_ghost_action_items, test_carry_over_actions,
                test_render_data_sections,
+               test_render_data_sections_zero_warn,
                test_replace_data_sections_overrides_garbage,
                test_replace_data_sections_inserts_missing,
+               test_replace_data_sections_h3_level,
+               test_brief_health_requires_all_sections,
                test_archive_layout_by_month):
         print(f"\n== {fn.__name__} ==")
         fn()
