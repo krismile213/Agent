@@ -25,6 +25,7 @@ agentcore.py — 通用 agent 引擎(前端无关)
 from __future__ import annotations
 
 import ast
+import copy
 import difflib
 import fnmatch
 import importlib
@@ -114,6 +115,14 @@ class LLMClient:
         self.session = requests.Session()
         self.usage = {"calls": 0, "prompt_tokens": 0,
                       "completion_tokens": 0, "total_tokens": 0}
+        # 完成度账本: 截断/空响应/重试降级等"结果可能不完整"的情况记在这里,
+        # 任务收尾时一起 emit("warning"), 别让上层只看到一个漂亮的 answer.
+        self.warnings: list[str] = []
+
+    def _warn(self, msg: str):
+        log(f"  [警告] {msg}")
+        if msg not in self.warnings:
+            self.warnings.append(msg)
 
     def _model_chain(self) -> list[str]:
         """主模型 + 可选降级链(cfg.model_fallbacks)。
@@ -186,7 +195,7 @@ class LLMClient:
                 msg0 = ch0.get("message") or {}
                 if ch0.get("finish_reason") == "length":
                     # 思考段吃满预算会表现为"正文很短/为空", 别当成正常完成
-                    log("  [警告] 模型输出触顶(finish_reason=length), 正文可能被截断")
+                    self._warn("模型输出触顶(finish_reason=length), 正文可能被截断")
                 if not msg0.get("tool_calls") and not (msg0.get("content") or "").strip():
                     # 空响应: HTTP 200 但 message 无内容且无 tool_calls —— 服务端过载
                     # 会这样秒回, 当作失败进重试链(2026-10-10 午后简报空壳教训)
@@ -209,6 +218,7 @@ class LLMClient:
                 if attempt < 3:
                     wait = 2 ** attempt
                     log(f"  [重试] 第{attempt}次调用失败({e}), {wait}s后重试")
+                    self._warn(f"LLM调用失败重试第{attempt}次({type(e).__name__})")
                     time.sleep(wait)
         storage.llm_call(payload["model"], int((time.time() - t0) * 1000),
                          "error", 3, None, stream=False)
@@ -258,6 +268,10 @@ class LLMClient:
                         u = obj.get("usage")
                         if isinstance(u, dict) and u.get("total_tokens"):
                             usage = u
+                        for ch in (obj.get("choices") or []):
+                            if ch.get("finish_reason") == "length":
+                                self._warn("模型输出触顶(finish_reason=length), "
+                                           "正文可能被截断")
                         ch = (obj.get("choices") or [{}])[0]
                         d = ch.get("delta") or {}
                         c = d.get("content")
@@ -310,6 +324,7 @@ class LLMClient:
                 if attempt < 3:
                     wait = 2 ** attempt
                     log(f"  [重试] 第{attempt}次流式调用失败({e}), {wait}s后重试")
+                    self._warn(f"LLM流式调用失败重试第{attempt}次({type(e).__name__})")
                     time.sleep(wait)
         storage.llm_call(payload["model"], int((time.time() - t0) * 1000),
                          "error", 3, None, stream=True)
@@ -797,6 +812,14 @@ def build_registry() -> Registry:
                        "description": "'recent' / 'YYYY-MM-DD' / 'all'"}},
          "required": []}, "read", t_recall_memory))
     r.register(Tool(
+        "load_skill",
+        "读取一个技能包的操作手册全文(只读). 技能索引已列在系统提示末尾; "
+        "只在任务确实匹配某个技能时调用, 一次一个, 不要为了'看看有什么'反复调用. "
+        "读到的是本行业的固定口径/步骤/易错点, 应严格照做并优先于你的常识.",
+        {"type": "object", "properties": {
+            "name": {"type": "string", "description": "技能包名字(索引里的 name)"}},
+         "required": ["name"]}, "read", t_load_skill))
+    r.register(Tool(
         "dingtalk_send",
         "把markdown消息推送到钉钉群机器人(对外发送, 不可撤回; 需用户双重确认:"
         "先确认草稿内容, 再确认实际发送). 建议先用 dry_run=true 验证配置再出草稿.",
@@ -881,7 +904,66 @@ SYSTEM_TEMPLATE = """你是 mini_agent, 一个运行在本地目录上的通用�
 def build_system_prompt() -> str:
     sp = SYSTEM_TEMPLATE.format(root=ROOT, today=datetime.now().strftime("%Y-%m-%d"))
     sp += _memory_block()
+    sp += _skills_block()
     return sp
+
+
+# ---------- 技能包(skills/<名字>/SKILL.md): 按需加载, 默认只露一行索引 ----------
+# 为什么不全塞进系统提示: 技能正文动辄几千字, 十来个技能就把上下文吃光,
+# 还会让模型在无关任务上被干扰。只给索引 + load_skill 工具, 用到哪个读哪个。
+SKILLS_DIR = HERE / "skills"
+
+
+def list_skills() -> list:
+    """[{name, desc, path}] —— 扫 skills/*/SKILL.md 顶部的 name/description."""
+    out = []
+    if not SKILLS_DIR.is_dir():
+        return out
+    for f in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        try:
+            head = f.read_text("utf-8", errors="replace")[:1_500]
+        except OSError:
+            continue
+        name = f.parent.name
+        desc = ""
+        if head.startswith("---"):          # 极简 YAML frontmatter
+            fm = head.split("---", 2)[1] if head.count("---") >= 2 else ""
+            for ln in fm.splitlines():
+                k, sep, v = ln.partition(":")
+                if not sep:
+                    continue
+                if k.strip() == "name" and v.strip():
+                    name = v.strip().strip("\"'")
+                elif k.strip() == "description":
+                    desc = v.strip().strip("\"'")
+        if not desc:                        # 没有 frontmatter: 取第一行非空正文
+            body = [l.strip() for l in head.splitlines()
+                    if l.strip() and not l.startswith(("---", "#"))]
+            desc = (body[0] if body else "")[:120]
+        out.append({"name": name, "desc": desc[:160], "path": f})
+    return out
+
+
+def _skills_block() -> str:
+    items = list_skills()
+    if not items:
+        return ""
+    lines = "\n".join(f"- {i['name']}: {i['desc']}" for i in items)
+    return ("\n# 可用技能包(只在任务真正需要时用 load_skill 读取正文, 不要预先加载)\n"
+            + clip(lines, 2_000))
+
+
+def t_load_skill(name: str) -> str:
+    """读技能正文(全文, 不截断) —— 正文即操作手册: 步骤/口径/易错点/验收方式."""
+    target = next((i for i in list_skills() if i["name"] == name), None)
+    if target is None:
+        avail = ", ".join(i["name"] for i in list_skills()) or "(无)"
+        return f"[工具错误] 没有名为 {name!r} 的技能包 (可用: {avail})"
+    try:
+        text = target["path"].read_text("utf-8", errors="replace")
+    except OSError as e:
+        return f"[工具错误] 读取技能失败: {e}"
+    return clip(text, 12_000)
 
 
 def _memory_block() -> str:
@@ -1260,6 +1342,14 @@ def _drain_inbox(inject, history: list, transcript: Transcript, emit) -> None:
 # ---------- 断点续跑: 会话级 checkpoint(轮边界落盘, 进程崩溃自然残留) ----------
 
 def _ckpt_path(sess: str) -> Path:
+    """断点文件路径。会话本身是临时文件路径(测试/子任务)时, 断点跟着进临时目录,
+    不要落进正式 sessions/ —— 否则每跑一次单测就在正式目录里留一颗废断点,
+    日积月累到 78 颗, 还会连累"恢复中断任务"的列表和一键删除配额。"""
+    if (os.sep in sess or "/" in sess or ":" in sess):
+        try:
+            return Path(sess).with_suffix(".ckpt.json")
+        except (OSError, ValueError):
+            pass
     safe = "".join(c for c in sess if c.isalnum() or c in "-_@") or "web"
     return HERE / "sessions" / f"{safe}.ckpt.json"
 
@@ -1371,16 +1461,44 @@ def inject_plat_ctx(history: list, plat_ctx, transcript=None) -> None:
         transcript.log("message", {"msg": history[idx]})
 
 
+def format_spec(spec: dict | None) -> str:
+    """把"结构化输出约定"渲染成提示词尾段.
+
+    spec 形如 {"目标": "...", "必给字段": {...}, "禁止": [...]}.
+    system 是全局不变的, 不宜逐任务改; 约定放任务侧只对本任务生效,
+    且位置在末尾(离生成点最近), 对小模型的约束力最强。
+    """
+    if not isinstance(spec, dict) or not spec:
+        return ""
+    lines = ["", "【本任务输出约定(优先级高于一般习惯)】"]
+    for k, v in spec.items():
+        if isinstance(v, (list, tuple)):
+            lines.append(f"- {k}:")
+            lines.extend(f"  · {i}" for i in v)
+        elif isinstance(v, dict):
+            lines.append(f"- {k}:")
+            lines.extend(f"  · {kk}: {vv}" for kk, vv in v.items())
+        else:
+            lines.append(f"- {k}: {v}")
+    return "\n".join(lines)
+
+
 def run_task(client: LLMClient, registry: Registry, policy,
              transcript: Transcript, history: list, task: str, cfg: dict,
              emit=None, cancel=None, emit_end: bool = True,
              inject: InstructionInbox | None = None,
-             plat_ctx: dict | None = None) -> str:
+             plat_ctx: dict | None = None,
+             spec: dict | None = None,
+             output_parser: "callable | None" = None) -> str:
     """执行一个任务: 模型→工具→结果回灌→再决策, 直到产出最终回答(或达轮数上限).
     cancel: 可选 threading.Event, 置位后在轮/工具边界优雅停止(steering 的基础).
     inject: 可选 InstructionInbox, 任务中途追加的指令在轮/工具边界注入历史.
     emit_end: 分步执行时中间步传False —— task_end 只代表"整个用户任务完成".
-    plat_ctx: 可选平台上下文(AI助手嵌入), 任务起步注入, 不改写用户消息."""
+    plat_ctx: 可选平台上下文(AI助手嵌入), 任务起步注入, 不改写用户消息.
+    spec: 可选结构化输出约定(见 format_spec), 只拼进本轮任务文本, 不动 system.
+    output_parser: 可选 answer -> answer 的确定性后处理(润色/校正/兜底重写),
+        在最后一次模型调用之后、emit/落库之前执行; 抛异常时原样返回答案.
+        —— 让"格式正确"由代码保证, 而不是反复求模型。"""
     emit = emit or (lambda kind, data: None)
     emit("task_start", {"task": task})
     import storage
@@ -1389,8 +1507,24 @@ def run_task(client: LLMClient, registry: Registry, policy,
     storage.task_begin(sess, parent=storage.current_task_id())
     write_checkpoint(sess, task, 0)  # 断点续跑: 起点落盘, 正常出口清除, 崩溃残留
     inject_plat_ctx(history, plat_ctx, transcript)
-    history.append({"role": "user", "content": task})
+    task_text = task + format_spec(spec)
+    history.append({"role": "user", "content": task_text})
     transcript.log("message", {"msg": history[-1]})
+
+    def _finish(answer: str) -> str:
+        """所有正常出口共用: 后处理 → 冲刷未写回的历史 → 事件 → 落库."""
+        if output_parser is not None:
+            try:
+                parsed = output_parser(answer)
+                if isinstance(parsed, str) and parsed.strip():
+                    answer = parsed
+            except Exception as e:      # 后处理失败不能连累任务结果
+                log(f"  [输出后处理失败, 用原答案] {type(e).__name__}: {e}")
+        for item in getattr(client, "warnings", []):   # 完成度的诚实账本
+            emit("warning", {"message": item})
+        if emit_end:
+            emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+        return answer
 
     def _cancelled() -> bool:
         return cancel is not None and cancel.is_set()
@@ -1403,8 +1537,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
             clear_checkpoint(sess)
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
-            if emit_end:
-                emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            answer = _finish(answer)
             storage.task_end("cancelled", answer, turns_used, client.usage)
             return answer
         _drain_inbox(inject, history, transcript, emit)  # 轮首检查点
@@ -1433,8 +1566,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
         if not calls:
             clear_checkpoint(sess)
             answer = (msg.get("content") or "").strip()
-            if emit_end:
-                emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            answer = _finish(answer)        # 后处理后的答案才是交付物
             storage.task_end("ok" if answer else "empty", answer,
                              turns_used, client.usage)
             return answer
@@ -1484,8 +1616,7 @@ def run_task(client: LLMClient, registry: Registry, policy,
             clear_checkpoint(sess)
             answer = "[用户中断] 任务已按用户要求停止."
             emit("cancelled", {})
-            if emit_end:
-                emit("task_end", {"answer": answer, "usage": dict(client.usage)})
+            answer = _finish(answer)
             storage.task_end("cancelled", answer, turns_used, client.usage)
             return answer
 

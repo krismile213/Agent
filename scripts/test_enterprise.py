@@ -7,6 +7,7 @@ scripts/test_enterprise.py — 企业化三件套测试: 数据层/可用性/可
 E2E(server): /api/health + /api/metrics(Prometheus格式) + 一次真实任务后指标变化
 """
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -18,6 +19,8 @@ import requests
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "scripts"))
+from host_shim import rm_rf  # noqa: E402
 
 import agentcore as core  # noqa: E402
 import storage  # noqa: E402
@@ -35,8 +38,19 @@ def check(name, cond):
 CFG = {"max_turns": 5, "context_budget_tokens": 999_999}
 
 
+@contextlib.contextmanager
+def _tmpdir():
+    """临时目录用 host_shim 清理: 宿主的删除钩子累计到阈值会直接 SystemExit,
+    而 TemporaryDirectory 的退出清理不在用例控制范围内, 一挂就整表变红。"""
+    d = Path(tempfile.mkdtemp())
+    try:
+        yield str(d)
+    finally:
+        rm_rf(d)
+
+
 def unit_storage():
-    with tempfile.TemporaryDirectory() as td:
+    with _tmpdir() as td:
         storage._reset(Path(td) / "t.db")
         tr = core.Transcript("sess_ut")
         tr.log("message", {"msg": {"role": "user", "content": "hi"}})
@@ -60,12 +74,15 @@ def unit_storage():
         check("旧JSONL回退读取",
               any(m.get("content") == "旧" for m in
                   core.Transcript.load_messages("legacy_ut")))
-        legacy.unlink()
+        # 顺序要紧: 先关连接再删文件。sqlite 连接持有文件句柄, 在 Windows 下
+        # 带锁的文件删不掉(报 WinError 32), 而 TemporaryDirectory 退出时的清理
+        # 一旦失败, 后面所有用例都跟着报错 —— 一次清理顺序错, 全表变红。
         storage._reset(HERE / "agent.db")
+        legacy.unlink()
 
 
 def unit_breaker():
-    with tempfile.TemporaryDirectory() as td:
+    with _tmpdir() as td:
         storage._reset(Path(td) / "t.db")
         br, _ = storage.Breaker(fails=2, cooldown=0.6), None
         try:
@@ -89,7 +106,7 @@ def unit_breaker():
 
 
 def unit_ratelimit():
-    with tempfile.TemporaryDirectory() as td:
+    with _tmpdir() as td:
         storage._reset(Path(td) / "t.db")
         rl = storage.RateLimiter(rpm=2, max_wait=0.3)
         rl.acquire()
@@ -105,7 +122,7 @@ def unit_ratelimit():
 
 
 def unit_telemetry():
-    with tempfile.TemporaryDirectory() as td:
+    with _tmpdir() as td:
         storage._reset(Path(td) / "t.db")
         storage.task_begin("ut_sess")
         storage.llm_call("test-model", 120, "ok", 0,

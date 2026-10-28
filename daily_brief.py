@@ -77,7 +77,7 @@ PM_DELTA_SOFT_MAX = 1200
 def ensure_brief_answer(client, history: list, answer: str,
                         min_len: int = BRIEF_MIN_CHARS,
                         sleeps=(20, 40), sleep_fn=time.sleep,
-                        hint: str = "") -> str:
+                        hint: str = "", post=None) -> str:
     """空简报兜底(2026-10-10 教训: 免费档 429/1305 过载把最终轮掐空,
     run_task 返回空正文照样写盘推送, 群里收到空壳).
 
@@ -85,6 +85,8 @@ def ensure_brief_answer(client, history: list, answer: str,
     生成简报"的纯生成指令(不带工具), 按退避间隔重试; 仍短则返回原值, 由调用方
     决定不推送+非零退出 —— 宁可缺今天的简报, 不发空壳占位。
     hint: 重生成指令(午后增量模式要换成"只写变化", 不能用晨检那套 500~1000 字).
+    post: 可选 answer -> answer 的确定性收尾(与 run_task 的 output_parser 同一份),
+        兜底生成出来的正文也要过一遍, 否则空壳重试出来的东西没走格式校正。
     """
     a = (answer or "").strip()
     if len(a) >= min_len:
@@ -105,7 +107,7 @@ def ensure_brief_answer(client, history: list, answer: str,
             core.log(f"  [空简报兜底] 重生成失败: {e}")
             continue
         if len(a) >= min_len:
-            return a
+            return post(a) if post else a
     return (answer or "").strip()
 
 
@@ -816,97 +818,38 @@ def prefetch_prompt(data: dict) -> str:
 
 TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 自动同步目录(重点手机膜)。
 **实时数据已由系统取好, 附在本提示词末尾的 "### xxx 输出" 里, 直接引用即可, 不要重复调工具。**
-**没有数据支撑的数字、SKU、人名、时间戳一律不许写** —— 2026-10-23 出过事故: 模型一次
-工具都没调, 直接编出三条"今日动态"(SKU 真实存在, 但状态/所在Part/审批人/负责人全是
-虚构的), 还据此编了行动建议。
 
-各数据源口径(数据已在末尾):
-1) sync_status: 钉钉同步定时任务的运行状态。其输出第二行 "[结论]" 即权威判定
-   (✅成功/❌失败/⏳进行中): 结论为✅就写"同步正常", 严禁自行推断或编造故障原因
-   (如"数据库锁定"等日志里没有的错误); "数据截至"反映的是审批内容最后更新时间,
-   周末/节假日无审批时数据截至会自然停在上一场, 这不等于同步故障。
-2) scan_sync_data: 状态分布 / 数据截至时间 / 今日有动态明细(含所在Part)。
-3) pipeline_alerts: 五层信号 —— 最近40天新增SKU(滚动40天, 含签样追踪) /
-   全流程临期(空运60·海运69) / 已超期 / 环节停滞超目标(近似段级) / Part9新单待办(创建≤7天且审批中)。
-4) 流程复盘/output/预警_加急SKU.md 是旧批次产物, 仅作背景补充(要读可调 read_file 取前40行);
-   与实时数据冲突时以实时为准。
-输出中文markdown简报(约500~1000字)。大标题由外层代码统一加, **你不要写大标题行**。
+你只负责三件事: ①同步结论、②今日动态、⑥行动建议。③④⑤ 的条目由系统从工具输出
+逐字填充(你只留标题), 不要去写。
 
-六节标题**照抄下面这六行短标题**(不要加括号说明、不要改写、不要另起名称):
-## ① 同步状态与数据截至
-## ② 今日动态
-## ③ 新增SKU与签样追踪
-## ④ 临期预警
-## ⑤ 已超期与环节停滞TOP
-## ⑥ 行动建议
+口径:
+- sync_status 的 "[结论]" 行是同步是否正常的唯一判定(✅/❌/⏳); 数据截至久未推进≠
+  同步故障(周末无审批自然停在前一场)。禁止推断日志里没有的故障原因。
+- scan_sync_data 的「今日有动态」是 ② 的唯一来源: 有明细就逐条给
+  SKU + 型号 + Part + 最新节点 + 当前负责人; 写 "0 单" 就写 "• 今日无新增动态"。
+- pipeline_alerts 的「Part9新单待办」可作为 ② 的补充, 工具只给 4 个字段, 不要补。
+- ⑥ ≤3 条, 必须指向上面真实出现过的 SKU: 谁、卡在哪个环节、要做什么、什么时候前完成。
 
-**格式铁律(最重要, 违反即返工):**
-- ③④⑤⑥ 各节内**每个条目独占一行, 行首统一 "• "**(半角点+空格);
-- **严禁**把多个条目用空格/分号/顿号挤进同一行 —— 宁可整篇字数超标, 也不许并成一列;
-- 条目必须换行分隔, 一行一个 SKU, 结尾不要加分号; 上一行的括号/方括号要闭合再换行;
-- ② 也按同样格式(每个动态一条 "• ");
-- ⑤ 含两组时, "已超期" 与 "环节停滞TOP" 各自单独成组, 组内仍逐条 "• ";
-- ⑥ 行动建议逐条 "• "(≤3条), 同样一行一条。
-- **不许编造**: SKU 编号、型号、人名、时间戳、Part 名称都必须逐字来自工具输出;
-  工具没给的字段宁可不写, 也不要猜, 拿不准就整条不写。
-- **不要复述本提示词里的任何规则原文**(规则是给你看的, 不是给读者看的), 直接输出六节内容。
-
-各节内容要求:
-① 若任一工具输出带 ⚠️ 数据过旧/同步停摆告警, 必须把"数据已N天未同步, ⑤的停滞天数
-   含断供期偏大"写在最顶部第一行, 再写其他内容; 数据截至久未变≠同步故障,
-   故障与否只看 sync_status 的 [结论] 行。同步结论与数据截至各占一行。
-② **只抄, 不推断**, 来源只有两处:
-   (a) scan_sync_data 的「今日有动态」段: 有明细就逐条照抄它的
-       "SKU 型号 @ Part | 状态:… | 最新节点:… | 当前负责人:…";
-       写的是 "今日有动态: 0 单" 就只写一行 "• 今日无新增动态", **不许自己补条目**。
-   (b) pipeline_alerts 的「Part9新单待办」段: 逐条给 SKU + 型号 + 创建时间 + 当前负责人
-       (工具只有这四项; 不要补 Part 名称、审批状态、审批节点、操作人 —— 工具没给就是没有)。
-   两处都没有内容时, ② 只写 "• 今日无新增动态", 不许虚构。
-③④⑤ 三节的**条目明细由系统从工具输出自动填充**(逐字符照搬, 保证货件号不失真)。
-   你**不要写这三节的条目**——只输出三行小节标题即可; 写了也会被覆盖, 白费 token。
-   **但取数照样要做**(上面 1)~3) 一个都不能少): ① 的结论和 ② 的明细都来自工具输出,
-   不调工具就只能编。需要你写的是: ① 的同步结论、② 的动态明细、⑥ 的行动建议。
-⑥ ≤3条。所有数字必须来自工具输出并注明来源; 每条提醒要可行动, 且必须指向
-   ①/② 里真实出现过的 SKU, 不许引用 ② 之外的编号。"""
+**不要编造**: SKU、型号、人名、时间戳、Part 名称逐字来自工具输出; 工具没给的宁可不写。
+格式不用操心 —— 结构、列表符号、标题都由代码统一, 写平实的短句即可。
+"""
 
 
 # 午后增量: 只写"相对晨检的变化", 不重复快照 —— 一份文档两次更新, 不刷屏.
-PM_TEMPLATE = """现在是当日午后更新({date} {hhmm})。今天 09:30 已出过一份完整晨检快照(见末尾
-【晨检基线】), 现在要的是**相对晨检的变化**, 供同一份日报的午后段落。
+PM_TEMPLATE = """现在是当日午后更新({date} {hhmm})。今天上午已出过完整晨检快照(见末尾
+【晨检基线】), 这次要的是**相对晨检的变化**, 供同一份日报的午后段落。
 
-请先重新取一次实时数据(与晨检同一批工具):
-1) sync_status  看同步结论与"数据截至"是否推进;
-2) scan_sync_data 看今日动态里 09:30 之后新增/更新了审批节点的单;
-3) pipeline_alerts 看临期/超期/停滞/SKU 数量相对基线有无变化。
+**实时数据已由系统取好, 附在本提示词末尾, 直接引用, 不要重复调工具。**
 
-然后**只输出变化部分**, 六节标题照样照抄(短标题, 不要加说明):
-## ① 同步状态与数据截至
-## ② 今日动态
-## ③ 新增SKU与签样追踪
-## ④ 临期预警
-## ⑤ 已超期与环节停滞TOP
-## ⑥ 行动建议
+你只负责: ② 09:30 之后的新动态、⑥ 行动建议。变化的判断口径:
+- ② 有新动态就逐条写 "SKU 型号 · Part/环节 · 最新审批节点+时间 · 当前负责人";
+  没有就写 "• 09:30 后无新增动态"。
+- ⑥ 必须承接晨检待办: 对着当前数据把晨检 ⑥ 的每条核一遍 —— 涉及的 SKU 还在
+  审批中/仍卡原环节, 就原样保留并标 "(晨检提出, 仍未推进)"; 确实推进了写明到了哪一步。
+  这一组不许因为"下午没新变化"就清空。再补因今天新增动态/新增SKU而多出来的动作(≤2 条)。
+- ④⑤ 的总数由系统按工具输出校正, 你不要写数字; 不要列 SKU(基线段就在上方)。
 
-规则(违反即返工):
-- 每节最多 6 条, 每条独占一行、行首 "• "; **一个 SKU 一条, 严禁 "G587-G590" 或 "G587、G588、G589" 合并**;
-- ② 每条动态写全 "SKU型号 · Part/环节 · 最新审批节点+时间 · 当前负责人"(最多 6 条, 超出在末尾写"等N单"),
-  不要只写"新增6单动态"这种没信息的汇总;
-- 没有变化就只写一行 "• 与晨检一致"(② 无新动态时写 "• 09:30 后无新增动态");
-- **④⑤ 只报总数, 不要列具体 SKU**: 晨检段就在本文档上方, 而且晨检的 ④⑤ 只列 TOP,
-  不在 TOP 里 ≠ 新增。写法示例: "• 已超期 22 个 / 停滞 267 单(晨检同数, 无变化)",
-  变了就写 "• 已超期 24 个(较晨检 +2)";
-- **只比汇总数字, 不要拿基线列了几行当基数**(晨检列 8 行、总数 22 个, 不是"从8增至22");
-- ① 分清两个时间: "最近同步"是 sync_status 的同步完成时间, "数据截至"是审批内容最后更新时间。
-  数据截至没推进就写 "• 数据截至仍为 …(未推进)", **不要拿同步时间冒充数据截至**;
-- ⑥ **必须承接晨检的待办, 不许清零**(2026-10-27 用户反馈: 晨检让"今日内完成 G592/G593
-  的 Part8 审批", 午后却写"无新增动作", 等于把上午的活悄悄撤了)。写法分两组:
-  ① 承接: 把晨检 ⑥ 的每一条对着当前数据核一遍 —— 涉及的 SKU 若仍在审批中/仍卡原环节,
-     原样保留该条并加 " (晨检提出, 仍未推进)"; 确实推进了就写 "• Gxxx 已推进到 PartX"。
-     这一组**不许因为"今天没新变化"就清空**;
-  ② 新增: 因 ②③(新增动态/新增SKU)或 ④⑤ 总数上升而新增的动作(≤2 条)。
-  两组都空才写 "• 无新增动作";
-- ⑥ 不要写任何条数/增量数字(总数由 ④⑤ 统一给, 你按基线行数做减法会算错);
-- 总字数 400 字以内, 不做背景解释、不写"总体平稳"之类套话。
+**不要编造**, 不要背景解释, 不写"总体平稳"这类套话。格式由代码统一, 写短句即可。
 
 【晨检基线】
 {baseline}
@@ -996,86 +939,102 @@ def main():
         min_chars = PM_MIN_CHARS
         prefetched = prefetch_tool_data(registry)     # 午后同样先取数, 别让模型凭基线猜
         task += prefetch_prompt(prefetched)
-        hint = ("数据已附在提示词末尾, 直接引用即可, 不要再调用工具。"
-                "请只输出相对晨检的变化: 六个 \"## ① …\" 小节标题照抄, "
-                "每节没有变化就写 \"• 与晨检一致\", 总字数 400 以内, "
-                "不要复述任何规则原文。")
         print(f"[{tag}] 增量模式: 基线来自 {day_file.name} 的「{am_label}」段")
     else:
         task = TASK_TEMPLATE.format(date=today, tag=tag)
         min_chars = BRIEF_MIN_CHARS
-        hint = ""
         prefetched = prefetch_tool_data(registry)     # 代码取好数, 不指望模型自觉
         task += prefetch_prompt(prefetched)
         if pm:
             print(f"[{tag}] 当天无可用晨检快照, 本次按完整六节生成并落同一份文档")
 
-    transcript = core.Transcript(
-        f"brief_{now.strftime('%Y%m%d')}{suffix}")
-    history = [{"role": "system", "content": core.build_system_prompt()}]
-    client = core.LLMClient(cfg)
-    answer = core.run_task(
-        client, registry, core.YoloPolicy(), transcript, history, task, cfg,
-        emit=lambda k, d: print(f"  [{k}] {str(d)[:120]}")
-        if k in ("tool_call", "tool_result", "fatal") else None)
-    transcript.log("end", {"reason": "brief", **client.usage})
-    transcript.close()
-
-    answer = ensure_brief_answer(client, history, answer, min_len=min_chars, hint=hint)
-    answer = normalize_brief_md(answer)
     # 体检的"合法 SKU 白名单"要含今日动态(来自 scan_sync_data), 否则 ② 里的
     # 真实动态会被误判成编造。白名单少一点只会多拦, 不会漏放。
     tool_out = (prefetched.get("pipeline_alerts", "") + "\n"
                 + prefetched.get("scan_sync_data", ""))
-    if not delta:
-        # ③④⑤ 由工具输出确定性渲染(不经模型): 数据段从此不可能被写坏/复读/写一半。
-        # 复用预取结果, 不再重复执行工具(渲染取不到就保留模型原文, 不阻断落盘)。
-        try:
-            answer, hit = replace_data_sections(answer, prefetched.get("pipeline_alerts", ""))
-            if hit:
-                print(f"[{tag}] ③④⑤ 确定性渲染: {'/'.join(hit)}")
-        except Exception as e:                  # noqa: BLE001
-            print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
-    probs = brief_health(answer, tool_out or None)
-    if probs:
-        print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 重生成一次")
-        answer = repair_brief_answer(client, history, answer, probs)
-        answer = normalize_brief_md(answer)
-        left = brief_health(answer, tool_out or None)
-        if left:
-            print(f"[{tag}] ⚠️ 重生成后仍有异常: {'; '.join(left)}")
-            # ② 编造不能只告警就放过: 假 SKU 会连 ⑥ 的行动建议一起带偏(2026-10-23
-            # 就出现了"提醒钱七处理 G533"这种指向虚构人和虚构状态的建议), 直接重建。
-            answer, fixed = replace_dynamic_section(answer, tool_out)
-            if fixed:
-                print(f"[{tag}] ② 已按工具输出重建(丢弃模型编造的动态)")
-            answer, n_drop = drop_ghost_skus(answer, tool_out)
-            if n_drop:
-                print(f"[{tag}] ⑥ 删除 {n_drop} 条引用不存在 SKU 的建议(编造残留)")
-            if fixed or n_drop:
-                left = brief_health(answer, tool_out or None)
+    client = core.LLMClient(cfg)
+
+    def finish(md: str) -> str:
+        """确定性收尾 —— 简报的格式由代码保证, 不靠模型自己和提示词角力.
+
+        原先是"生成 → 体检 → 有问题再重生成一次 → 还有问题再按工具重建", 模型
+        每次都可能换个花样违反(2026-10-22 复读提示词 / 10-23 编 SKU / 10-27 ⑥清零).
+        现在改成一次生成 + 一次有上限的修复, 剩下全部交给确定性函数:
+          normalize(结构) → ③④⑤ 按工具渲染 → ② 按工具重建 → 删幽灵 SKU
+          → (午后) ④⑤ 只留计数、计数按工具校正、⑥ 承接晨检待办。
+        这样"最坏情况"也只是文字平淡一点, 不会出现编造/复读/写一半。
+        """
+        md = normalize_brief_md(md)
+        if not delta:
+            # ③④⑤ 由工具输出确定性渲染(不经模型): 数据段不可能被写坏/复读/写一半。
+            # 复用预取结果, 不再重复执行工具(取不到就保留模型原文, 不阻断落盘)。
+            try:
+                md, hit = replace_data_sections(md, prefetched.get("pipeline_alerts", ""))
+                if hit:
+                    print(f"[{tag}] ③④⑤ 确定性渲染: {'/'.join(hit)}")
+            except Exception as e:                  # noqa: BLE001
+                print(f"[{tag}] ③④⑤ 渲染跳过(保留模型原文): {e}")
+
+        probs = brief_health(md, tool_out or None)
+        if probs:
+            print(f"[{tag}] ⚠️ 正文异常: {'; '.join(probs)} — 修复一次")
+            md = repair_brief_answer(client, history, md, probs)
+            md = normalize_brief_md(md)
+            left = brief_health(md, tool_out or None)
             if left:
-                print(f"[{tag}] ⚠️ 仍异常: {'; '.join(left)} "
-                      f"(已按确定性清理后的正文落盘)")
-    if delta:
-        answer, dropped = refine_delta(answer, morning)
-        if dropped:
-            print(f"[{tag}] 过滤 {dropped} 条 ④⑤ 的 SKU 明细(午后只报计数, 明细见晨检段)")
-        try:
-            now_counts = parse_counts(prefetched.get("pipeline_alerts", ""))
-            if now_counts.get("over") is not None or now_counts.get("warn") is not None:
-                answer = apply_counts(answer, now_counts, parse_counts(morning))
-                print(f"[{tag}] ④⑤ 计数按工具校正: 临期 {now_counts.get('warn')} / "
-                      f"已超期 {now_counts.get('over')} / 停滞 {now_counts.get('stale')}")
-        except Exception as e:                      # 取不到就用模型写的, 不影响落盘
-            print(f"[{tag}] 计数校正跳过: {e}")
-        # 晨检的待办不能因为"下午没新变化"就消失(2026-10-27 用户反馈)
-        answer, n_carry = carry_over_actions(answer, morning, tool_out)
-        if n_carry:
-            print(f"[{tag}] ⑥ 承接晨检待办 {n_carry} 条(标注「晨检提出, 仍未推进」)")
-    if delta and len((answer or "").strip()) > PM_DELTA_SOFT_MAX:
-        print(f"[{tag}] ⚠️ 增量正文 {len(answer)} 字(> {PM_DELTA_SOFT_MAX}), "
-              f"模型可能重抄了基线; 已照写, 下次留意")
+                print(f"[{tag}] ⚠️ 修复后仍有异常: {'; '.join(left)}")
+                # ② 编造不能只告警就放过: 假 SKU 会连 ⑥ 的行动建议一起带偏(2026-10-23
+                # 出现了"提醒钱七处理 G533"这种指向虚构人和虚构状态的建议), 直接重建。
+                md, fixed = replace_dynamic_section(md, tool_out)
+                if fixed:
+                    print(f"[{tag}] ② 已按工具输出重建(丢弃模型编造的动态)")
+                md, n_drop = drop_ghost_skus(md, tool_out)
+                if n_drop:
+                    print(f"[{tag}] ⑥ 删除 {n_drop} 条引用不存在 SKU 的建议(编造残留)")
+                remain = brief_health(md, tool_out or None)
+                if (fixed or n_drop) and remain:
+                    print(f"[{tag}] ⚠️ 仍异常: {'; '.join(remain)} "
+                          f"(已按确定性清理后的正文落盘)")
+
+        if delta:
+            md, dropped = refine_delta(md, morning)
+            if dropped:
+                print(f"[{tag}] 过滤 {dropped} 条 ④⑤ 的 SKU 明细"
+                      f"(午后只报计数, 明细见晨检段)")
+            try:
+                now_counts = parse_counts(prefetched.get("pipeline_alerts", ""))
+                if (now_counts.get("over") is not None
+                        or now_counts.get("warn") is not None):
+                    md = apply_counts(md, now_counts, parse_counts(morning))
+                    print(f"[{tag}] ④⑤ 计数按工具校正: 临期 {now_counts.get('warn')} / "
+                          f"已超期 {now_counts.get('over')} / "
+                          f"停滞 {now_counts.get('stale')}")
+            except Exception as e:                  # 取不到就用模型写的, 不影响落盘
+                print(f"[{tag}] 计数校正跳过: {e}")
+            # 晨检的待办不能因为"下午没新变化"就消失(2026-10-27 用户反馈)
+            md, n_carry = carry_over_actions(md, morning, tool_out)
+            if n_carry:
+                print(f"[{tag}] ⑥ 承接晨检待办 {n_carry} 条(标注「晨检提出, 仍未推进」)")
+            if len((md or "").strip()) > PM_DELTA_SOFT_MAX:
+                print(f"[{tag}] ⚠️ 增量正文 {len(md)} 字(> {PM_DELTA_SOFT_MAX}), "
+                      f"模型可能重抄了基线; 已照写, 下次留意")
+        return md
+
+    transcript = core.Transcript(f"brief_{now.strftime('%Y%m%d')}{suffix}")
+    history = [{"role": "system", "content": core.build_system_prompt()}]
+    # output_parser 在最后一次模型调用之后、落盘之前跑: 见 finish() 的说明。
+    answer = core.run_task(
+        client, registry, core.YoloPolicy(), transcript, history, task, cfg,
+        emit=lambda k, d: print(f"  [{k}] {str(d)[:120]}")
+        if k in ("tool_call", "tool_result", "fatal", "warning") else None,
+        output_parser=finish)
+    transcript.log("end", {"reason": "brief", **client.usage})
+    transcript.close()
+
+    # 空壳防线: 模型整篇没写出来(限流掐空)时再催一次, 并同样走确定性收尾,
+    # 至少保证 ③④⑤ 的实时数据能落盘 —— 正文不足时仍然不推送(见下方 ret)。
+    answer = ensure_brief_answer(client, history, answer, min_len=min_chars,
+                                 hint="", post=finish)
 
     if delta:
         body = compose_daily(today, am_body=morning, pm_body=answer,

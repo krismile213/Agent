@@ -17,6 +17,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "scripts"))
+from host_shim import unlink as shim_unlink  # noqa: E402
 
 import agentcore as core  # noqa: E402
 
@@ -231,12 +233,12 @@ def e2e():
 
     print("[E2E] 计划模式全流程")
     target = HERE / "plan_test.md"
-    target.unlink(missing_ok=True)
+    shim_unlink(target)
     out = run(["--yolo", "--plan", "--session", "adv_plan",
                "统计当前目录下所有 .py 文件的数量, 并把结果写入 plan_test.md"])
     check("计划被生成与批准", "[计划]" in out and "已批准" in out)
     check("按计划执行(文件落盘)", target.exists())
-    target.unlink(missing_ok=True)
+    shim_unlink(target)
 
     print("[E2E] 分步计划(--stepwise)")
     out = run(["--yolo", "--plan", "--stepwise", "--session", "adv_steps",

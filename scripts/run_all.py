@@ -44,6 +44,7 @@ FAST = [
     ("Web渲染器", ["node", "scripts/test_web_md.js"]),
     ("企业化三件套单测", [sys.executable, "scripts/test_enterprise.py", "--unit-only"]),
     ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),
+    ("任务契约四件套", [sys.executable, "scripts/test_task_contract.py"]),
 ]
 FULL_EXTRA = [
     ("文件接口", [sys.executable, "scripts/test_files.py"]),
@@ -75,11 +76,22 @@ def main():
             continue
         print(f"\n===== {name} =====")
         t = time.time()
-        p = subprocess.run(cmd, cwd=str(HERE))
-        results.append((name, "PASS" if p.returncode == 0 else "FAIL",
-                        round(time.time() - t, 1)))
+        # 子进程输出一律落文件再转发, 不走管道: (1) 宿主的 safe-delete shim 在
+        # 管道/特殊 stdout 下会把正常退出改写成 SystemExit(1), 秒挂一片; (2) 输出
+        # 落盘后失败时能直接回看现场, 不用重跑。
+        import tempfile
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as fh:
+            p = subprocess.run(cmd, cwd=str(HERE), stdout=fh,
+                               stderr=subprocess.STDOUT)
+            fh.seek(0)
+            sys.stdout.write(fh.read())
+        dur = round(time.time() - t, 1)
+        results.append((name, "PASS" if p.returncode == 0 else "FAIL", dur))
         if p.returncode != 0:
-            print(f"!!! {name} 失败 (exit={p.returncode})")
+            # 一定要带耗时: 正常套件不可能 2 秒就失败, 秒挂基本是"根本没跑起来"
+            # (解释器找不到 / 依赖缺失 / 输出重定向踩到宿主的 shim), 和业务失败
+            # 是两类问题, 分开看才判得准。
+            print(f"!!! {name} 失败 (exit={p.returncode}, {dur}s)")
 
     n_ok = sum(1 for _, s, _ in results if s == "PASS")
     print(f"\n{'=' * 46}\n[总览] tier={args.tier}  "

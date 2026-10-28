@@ -14,6 +14,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "scripts"))
+from host_shim import rm_rf  # noqa: E402
 
 RESULTS = []
 
@@ -67,9 +69,7 @@ def test_latest_parts():
         check("无时间戳后缀的裸名文件不丢",
               any(p.name == "Part9_检查.xlsx" for p in _latest_parts(tmp)))
     finally:
-        for f in tmp.iterdir():
-            f.unlink()
-        tmp.rmdir()
+        rm_rf(tmp)
 
 
 def _skip_if_no_data() -> bool:
@@ -127,7 +127,7 @@ def test_part9_new_offline():
         check("已结束单不进Part9层", "G903" not in seg9)
         check("声明数量=1单", "1单" in out.split("== Part9新单待办")[1][:40])
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rm_rf(tmp)
 
 
 def test_new_sku_window_offline():
@@ -208,7 +208,7 @@ def test_new_sku_window_offline():
                                              ("c", "3"), ("d", "4")]}, "G9"))
         check("_ship_tag 无记录为空串", wm._ship_tag({}, "G9") == "")
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rm_rf(tmp)
 
 
 def test_stale_cap_offline():
@@ -277,7 +277,7 @@ def test_stale_cap_offline():
               and "G812" in outp.split("== 已超期", 1)[1].split("== 环节停滞", 1)[0])
         check("全流程线: 125天单计入历史遗留", "历史遗留1个" in outp)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rm_rf(tmp)
 
 
 def test_tools_real():
@@ -393,7 +393,7 @@ def test_sync_conclusion_offline():
         concl4 = [l for l in out4.splitlines() if l.startswith("[结论]")]
         check("久未更新无结束行判❌中断", concl4 and "❌" in concl4[0] and "同步结束" in concl4[0])
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        rm_rf(tmp)
 
 
 def main():

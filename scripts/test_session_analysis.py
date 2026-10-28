@@ -22,6 +22,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "scripts"))
+from host_shim import rm_rf  # noqa: E402
 
 import analyze_sessions as az  # noqa: E402
 
@@ -114,7 +115,7 @@ def test_db_stats():
     print("\n== load_db_stats 聚合 ==")
     db = TMP / "t.db"
     if TMP.exists():
-        shutil.rmtree(TMP, ignore_errors=True)
+        rm_rf(TMP)
     TMP.mkdir(parents=True, exist_ok=True)
     _build_db(db)
     before = hashlib.sha256(db.read_bytes()).hexdigest()
@@ -225,7 +226,7 @@ def main():
     test_jsonl_stats()
     test_findings()
     test_render()
-    shutil.rmtree(TMP, ignore_errors=True)
+    rm_rf(TMP)
     n_ok = sum(1 for _, ok in RESULTS if ok)
     print(f"\n[总览] 失败模式复盘单测: {n_ok}/{len(RESULTS)}")
     return 0 if n_ok == len(RESULTS) else 1

@@ -14,10 +14,13 @@ scripts/test_brief_guard.py — 空简报防线的离线单测(零 LLM)
 """
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "scripts"))
+from host_shim import rm_rf  # noqa: E402  绕开宿主删除钩子(见 host_shim 说明)
 
 RESULTS = []
 
@@ -109,6 +112,24 @@ def _isolated_db(name: str):
     return d
 
 
+def _drop_db(d):
+    """切回主库再删临时目录。
+
+    sqlite 连接会一直持有 t.db 的句柄, 不去切走就 shutil.rmtree 不掉(Windows
+    WinError 32); 之前用 ignore_errors 静默跳过, 于是 .workbuddy/tmp_* 一路堆积,
+    现在还会撞上宿主的批量删除拦截, 把整个套件拖红。
+    """
+    import storage
+    storage._reset(HERE / "agent.db")
+    for _ in range(3):                      # Windows 句柄释放有延迟, 重试几次
+        if not d.exists():
+            return
+        rm_rf(d)
+        if not d.exists():
+            return
+        time.sleep(0.2)
+
+
 def test_stream_empty_retry():
     print("\n== chat_stream 空流检测 ==")
     import agentcore as core
@@ -145,8 +166,7 @@ def test_stream_empty_retry():
               .get("function", {}).get("name") == "sync_status")
         check("tool_calls轮无重试", len(c3.session.calls) == 1)
     finally:
-        import shutil
-        shutil.rmtree(d, ignore_errors=True)
+        _drop_db(d)
 
 
 def test_chat_empty_retry():
@@ -166,8 +186,7 @@ def test_chat_empty_retry():
         check("非流式重试换模型", len(c.session.calls) == 2
               and c.session.calls[1]["json"]["model"] == "m2")
     finally:
-        import shutil
-        shutil.rmtree(d, ignore_errors=True)
+        _drop_db(d)
 
 
 def test_ensure_brief_answer():
