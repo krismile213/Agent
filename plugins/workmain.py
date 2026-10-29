@@ -1046,24 +1046,50 @@ def _plat_sanitize(obj):
     return obj
 
 
+def _plat_reason(e) -> str:
+    """把底层异常压成一句话原因 —— 完整堆栈贴给用户是噪音, 模型还容易原样转述
+    (2026-10-29 实测: 回复里整段贴了 HTTPConnectionPool(...) Max retries exceeded)."""
+    s = str(e)
+    m = re.search(r"port=(\d+)", s)
+    where = f"端口 {m.group(1)}" if m else "端口"
+    name = type(e).__name__
+    if "Timeout" in name:
+        return f"平台后端响应超时({where})"
+    if "Connection" in name or "Connection" in s:
+        return f"连不上平台后端({where} 无响应)"
+    return f"{name}"
+
+
+# 平台不通时的降级指引: 不写这段, 模型只会说"稍后重试"然后两手空空收场,
+# 而本地同步数据其实能给出近似答案(2026-10-29 实测)。
+_PLAT_FALLBACK = (
+    "处理方式: ① 直说平台服务当前不可用(数据后台系统 start.py 未启动), 绝不编造数据; "
+    "② 若问题可用本地同步数据近似回答, 改用 pipeline_alerts(流程信号) / "
+    "inflight_report(事中日报) / query_sku_route(单SKU) 给替代答案, 并标注"
+    "「平台接口不可用, 以下为本地同步数据, 口径可能不同」; "
+    "③ 不要再调其它 platform_* 工具 —— 同一个后端, 都会失败。"
+)
+
+
 def _plat_get(base: str, path: str, params: dict | None = None):
     """平台后端 GET。任何失败都返回 (None, 人话错误文本) —— 降级不抛异常,
-    模型拿着错误文本可自愈(提示用户稍后重试/改用平台页面), 任务不中断。"""
+    模型拿着错误文本可自愈: 先告知用户, 再降级到本地数据工具给替代答案。"""
     if _requests is None:
-        return None, "[平台接口不可用] 运行环境缺少 requests, 无法调用平台后端。"
+        return None, ("[平台接口不可用] 运行环境缺少 requests, 无法调用平台后端。"
+                      + _PLAT_FALLBACK)
     url = f"{base}/api/{str(path).strip('/')}"
     try:
         r = _plat_session().get(url, params=params or {}, timeout=(3, 30))
     except Exception as e:
-        return None, (f"[平台接口不可用] {type(e).__name__}: {e}；"
-                      "请确认平台后端已启动(数据后台系统 start.py), 稍后重试。")
+        return None, f"[平台接口不可用] {_plat_reason(e)}。" + _PLAT_FALLBACK
     if r.status_code != 200:
-        return None, (f"[平台接口不可用] HTTP {r.status_code} ← {path}；"
-                      "请稍后重试或改用平台页面确认。")
+        return None, (f"[平台接口不可用] HTTP {r.status_code} ← /api/{path}。"
+                      + _PLAT_FALLBACK)
     try:
         return r.json(), ""
     except Exception:
-        return None, "[平台接口不可用] 响应不是 JSON, 平台后端版本可能不匹配。"
+        return None, ("[平台接口不可用] 响应不是 JSON, 平台后端版本可能不匹配。"
+                      + _PLAT_FALLBACK)
 
 
 def _plat_brief(obj, indent: int = 0, lines: list | None = None,

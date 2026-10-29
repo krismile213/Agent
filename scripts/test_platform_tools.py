@@ -173,6 +173,14 @@ def test_degrade():
             out = reg.tools[name].func(**kwargs)
             check(f"降级: {name} 返回人话文本",
                   isinstance(out, str) and "[平台接口不可用]" in out)
+            # 光说"不可用"模型就两手空空收场(2026-10-29 实测): 必须带降级指引,
+            # 否则本地 pipeline_alerts 明明能答, 用户却只拿到"请稍后重试"。
+            check(f"降级: {name} 带降级指引",
+                  "pipeline_alerts" in out and "不要再调其它 platform_" in out,
+                  extra=out[:80])
+            check(f"降级: {name} 不把底层堆栈丢给用户",
+                  "HTTPConnectionPool" not in out and "Max retries" not in out,
+                  extra=out[:80])
         except Exception as e:  # 不应走到这里
             check(f"降级: {name} 不抛异常", False, extra=repr(e))
 
