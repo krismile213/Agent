@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""scripts/test_fallback.py — 失败兜底文本单测(零 LLM, 零网络)
+"""scripts/test_fallback.py — 工具输出文本契约单测(零 LLM, 零网络)
+
+覆盖两类: 失败兜底文本、口径对照说明。
 
 背景(2026-10-29 实测): 关掉平台后端问"今天有哪些加急预警", 模型照抄
 HTTPConnectionPool 堆栈, 只说"请稍后重试"就收场 —— 而本地 pipeline_alerts
@@ -91,6 +93,23 @@ def test_no_raw_stacktrace():
     check("给了降级指引", "pipeline_alerts" in out, out[:60])
 
 
+def test_caliber_contrast():
+    """「超期」有两个数(2026-10-29 实测: pipeline_alerts 24 / inflight_report 6),
+    都正确但统计对象不同。两个工具的输出都必须点明差异, 否则用户以为其中一个算错了。"""
+    print("\n== 口径对照 ==")
+    reg, _ = _registry()
+    for name, other in (("pipeline_alerts", "inflight_report"),
+                        ("inflight_report", "pipeline_alerts")):
+        out = reg.execute(name, {})
+        line = next((l for l in out.split("\n") if "口径对照" in l), "")
+        check(f"{name}: 有口径对照行", bool(line), out[:80])
+        if not line:
+            continue
+        check(f"{name}: 点名另一个工具 {other}", other in line, line[:80])
+        check(f"{name}: 禁止替代/相加/混用",
+              "不能互相替代" in line or "不能相加" in line, line[:90])
+
+
 def test_unknown_tool_message():
     """工具名写错时, 错误文本要列出可用工具(模型据此自我纠正)。"""
     print("\n== 工具名写错 ==")
@@ -103,6 +122,7 @@ def test_unknown_tool_message():
 def main() -> int:
     test_empty_sync_dir()
     test_missing_product_file()
+    test_caliber_contrast()
     test_no_raw_stacktrace()
     test_unknown_tool_message()
     bad = [n for n, ok in RESULTS if not ok]
