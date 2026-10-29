@@ -127,8 +127,19 @@ def main():
               core.t_load_skill("不存在的技能").startswith("[工具错误]"))
         # 索引只露一行描述, 不能把正文整段塞进系统提示
         check("系统提示只装索引不装正文", len(block) < 4000)
+        # 2026-10-29 实测: 原措辞"只在真正需要时读, 不要预先加载"让模型一路不加载,
+        # 凭经验硬答分诊问题还编了三个不存在的人名。改成"命中即读"后才会先读再答。
+        check("索引措辞是「命中即读」而非「不要预先加载」",
+              "命中即读" in block and "不要预先加载" not in block, block[:120])
+        check("索引说明凭经验答会漏掉口径纪律", "漏掉" in block, block[:160])
     else:
         check("没有技能时索引为空串", block == "")
+
+    print("[5] 全局数据纪律")
+    sp = core.build_system_prompt()
+    check("系统提示含人名/编号纪律", "人名/编号纪律" in sp)
+    check("明确禁止编造姓名", "不要编造姓名" in sp, sp[:80])
+    check("要求指人写岗位而非姓名", "岗位" in sp)
 
     print()
     if FAIL:
