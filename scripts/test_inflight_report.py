@@ -69,8 +69,9 @@ def test_contract():
     if t is None:
         return
     check("契约: level=read(自动放行, 无人值守链路可用)", t.level == "read")
-    check("契约: workmain 工具数 8+1 → 9 基础 + 10 平台 = 19",
-          len(reg.tools) == 19, extra=str(len(reg.tools)))
+    # 2026-10-29: 9 基础 + 10 平台 + pipeline_trend(跨日期趋势) = 20
+    check("契约: workmain 工具数 9 基础 + 10 平台 + 1 趋势 = 20",
+          len(reg.tools) == 20, extra=str(len(reg.tools)))
     props = t.parameters.get("properties", {})
     check("契约: line 枚举仅手机膜/手机壳(路径逃逸防线)",
           props.get("line", {}).get("enum") == ["手机膜", "手机壳"])

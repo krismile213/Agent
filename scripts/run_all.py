@@ -46,6 +46,7 @@ FAST = [
     ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),
     ("任务契约四件套", [sys.executable, "scripts/test_task_contract.py"]),
     ("失败兜底文本", [sys.executable, "scripts/test_fallback.py"]),
+    ("流程趋势工具", [sys.executable, "scripts/test_trend.py"]),
 ]
 FULL_EXTRA = [
     ("文件接口", [sys.executable, "scripts/test_files.py"]),

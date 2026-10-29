@@ -910,6 +910,118 @@ def register(registry, cfg: dict) -> int:
 
         return clip("\n".join(out), 3800)
 
+    def t_pipeline_trend(days: int = 14, line: str = "手机膜") -> str:
+        """流程趋势: 按日对比 在研/超期/进行中/预警, 并给出较上一份的变化。
+
+        为什么需要它: 其余工具都是「当前快照」, 问"这周比上周超期多了多少"只能
+        让模型自己调两次 inflight_report 再心算 —— 算错了没人校验。这里把多次
+        取数的结果做成确定性汇总, 模型只负责解读。
+
+        数据源: 平台每日 09:00 生成的《事中日报》归档(reports/事中日报_YYYYMMDD.xlsx),
+        纯本地只读, 不依赖平台后端在线。周末/节假日没有日报 → 该日缺行, 不是 0。
+        口径: 平台侧 segment, 与 pipeline_alerts 的 Part 编号口径不同, 引用须注明。
+        """
+        reports = (root / "data" / str(line) / str(line) / "reports").resolve()
+        try:
+            reports.relative_to(root.resolve())     # 防 line 参数路径逃逸
+        except ValueError:
+            return f"[错误] 非法品类名: {line!r} (仅支持 手机膜/手机壳)"
+        if not reports.is_dir():
+            return (f"[错误] 事中日报目录不存在: {reports}。"
+                    "趋势依赖日报归档; 目录不存在说明平台还没为这个品类生成过日报。")
+
+        # 同一天可能有两份(正式名 + Excel 占用时的 _HHMMSS 后缀), 取 mtime 最新那份
+        best = {}
+        for p in reports.glob("事中日报_*.xlsx"):
+            m = re.search(r"(\d{8})", p.stem)
+            if not m:
+                continue
+            k = m.group(1)
+            if k not in best or p.stat().st_mtime > best[k].stat().st_mtime:
+                best[k] = p
+        if not best:
+            return (f"[错误] {reports} 下没有可解析的 事中日报_*.xlsx。"
+                    "处理: 日报由平台每日 09:00 生成; 目录为空说明平台任务没跑过, "
+                    "改用 pipeline_alerts 看当前快照。")
+
+        n = max(2, min(int(days or 14), 60))
+        keys = sorted(best)[-n:]
+        rows, skipped = [], []
+        for k in keys:
+            txt = t_inflight_report(line=line, date=k)
+            m = re.search(r"在研状态总表\s*\((\d+)\s*SKU:([^)]*)\)", txt)
+            if not m:                       # 当天文件损坏/结构变了 → 跳过但不静默
+                skipped.append(k)
+                continue
+            kv = {}
+            for label in ("超期", "进行中", "预警"):
+                mm = re.search(rf"{label}\s*(\d+)", m.group(2))
+                kv[label] = int(mm.group(1)) if mm else None
+            rows.append((k, int(m.group(1)), kv))
+
+        if not rows:
+            return (f"[错误] {line} 近 {n} 天的日报都读不出「在研状态总表」。"
+                    "处理: 直接看最新一份(inflight_report 不传 date), 或改用 pipeline_alerts。")
+
+        def cell(v):
+            return "—" if v is None else str(v)
+
+        # 平台在 2026-10 中旬后不再输出「预警」分组 → 整列为 None。
+        # 留着只会让读者以为"预警一直是 0", 干脆整列省略并说明。
+        show_warn = any(kv.get("预警") is not None for _, _, kv in rows)
+        head = "日期        在研   超期   进行中" + ("  预警" if show_warn else "") + "   超期变化"
+        out = [f"流程趋势 · {line} · 近 {n} 天(实际 {len(rows)} 份日报)", head]
+        prev = None
+        for k, total, kv in rows:
+            over = kv.get("超期")
+            if prev is None or over is None:
+                delta = "—"
+            else:
+                d = over - prev
+                delta = "持平" if d == 0 else f"{d:+d}"
+            line_txt = (f"{k[4:6]}-{k[6:]}      {total:>4}  {cell(over):>4}  "
+                        f"{cell(kv.get('进行中')):>5}")
+            if show_warn:
+                line_txt += f"  {cell(kv.get('预警')):>4}"
+            line_txt += f"   {delta}"
+            out.append(line_txt)
+            prev = over
+
+        first, last = rows[0], rows[-1]
+        d_over = (last[2].get("超期") or 0) - (first[2].get("超期") or 0)
+        span = f"{first[0][4:6]}-{first[0][6:]} → {last[0][4:6]}-{last[0][6:]}"
+        out.append(f"\n区间对比({span}): 在研 {first[1]} → {last[1]} 个; "
+                   f"超期 {first[2].get('超期')} → {last[2].get('超期')} 个({d_over:+d})")
+        if not show_warn:
+            out.append("注: 这批日报的汇总行没有「预警」分组, 故不列该列(不是预警为 0)")
+        if skipped:
+            out.append(f"注: {'/'.join(s[4:6] + '-' + s[6:] for s in skipped)} 的日报结构异常, 已跳过")
+        # 按「份数」切而不是按日历切: 周末没有日报, 按日历切会让两段长度不等、
+        # 口径错位(2026-10-29 实测模型就是这么算错的)。这里直接给出结论行, 让它照抄。
+        if len(rows) >= 4:
+            half = min(7, len(rows) // 2)
+            recent, prev_rows = rows[-half:], rows[-2 * half:-half]
+            r_over = [kv.get("超期") for _, _, kv in recent if kv.get("超期") is not None]
+            p_over = [kv.get("超期") for _, _, kv in prev_rows if kv.get("超期") is not None]
+            if r_over and p_over:
+                ra, pa_ = sum(r_over) / len(r_over), sum(p_over) / len(p_over)
+                diff = ra - pa_
+                rpk = max(recent, key=lambda r: r[2].get("超期") or -1)
+                ppk = max(prev_rows, key=lambda r: r[2].get("超期") or -1)
+                out.append(
+                    f"最近{len(recent)}份 vs 前{len(prev_rows)}份(按份数切, 避开缺日错位): "
+                    f"超期均值 {pa_:.1f} → {ra:.1f} ({diff:+.1f}); "
+                    f"峰值 {ppk[2].get('超期')}({ppk[0][4:6]}-{ppk[0][6:]}) → "
+                    f"{rpk[2].get('超期')}({rpk[0][4:6]}-{rpk[0][6:]}); "
+                    f"最新 {recent[-1][2].get('超期')}({recent[-1][0][4:6]}-{recent[-1][0][6:]})")
+        out.append("口径: 平台事中日报 segment 口径, 与 pipeline_alerts 的 Part 编号口径不同, "
+                   "引用须注明来源。缺行日期是周末/节假日(平台不出日报), 不是 0。")
+        # 模型会自己按日期切"本周/上周"再相减, 缺日一错位结论就反了(2026-10-29 实测:
+        # 说成"从5个增加到4个, 净减少1个")。把正确姿势写在数据里, 比写进系统提示有效。
+        out.append("引用: 「本周vs上周」直接抄上面那行「最近N份 vs 前N份」, 不要自己按日期切; "
+                   "要别的窗口就用 days 参数重调, 引「区间对比」行。")
+        return clip("\n".join(out), 3800)
+
     # ---------- 注册 ----------
 
     registry.register(Tool(
@@ -976,6 +1088,23 @@ def register(registry, cfg: dict) -> int:
             "date": {"type": "string",
                      "description": "可选, YYYYMMDD 或 YYYY-MM-DD; 缺省读最新一份"}},
          "required": []}, "read", t_inflight_report))
+    registry.register(Tool(
+        "pipeline_trend",
+        "流程趋势(近N天): 按日对比 在研/超期/进行中/预警 的数量, 并给出较上一份的"
+        "变化与区间对比。用于「这周比上周超期多了多少」「最近趋势怎么样」这类"
+        "跨日期问题 —— 其余工具都是当前快照, 靠模型自己多次取数再心算容易错。"
+        "数据源为平台每日09:00生成的事中日报归档, 纯本地只读不依赖平台后端在线。"
+        "口径为平台segment, 与 pipeline_alerts 的Part口径不同, 引用须注明; "
+        "周末/节假日无日报则该日缺行(不是0)。line默认手机膜; days默认14(2~60)。"
+        "**引用纪律**: 要「本周vs上周」这类对比时, 用 days=7 和 days=14 各调一次, "
+        "直接引用输出末尾的「区间对比」行; 不要自己按日期切分区间再相减 —— "
+        "日报缺日会让切分口径错位, 算出来是错的(2026-10-29 实测过)。",
+        {"type": "object", "properties": {
+            "days": {"type": "integer", "minimum": 2, "maximum": 60,
+                     "description": "回看天数, 默认14"},
+            "line": {"type": "string", "enum": ["手机膜", "手机壳"],
+                     "description": "品类, 缺省手机膜"}},
+         "required": []}, "read", t_pipeline_trend))
     registry.register(Tool(
         "run_route_check",
         "对指定SKU重跑路线复盘脚本并返回单SKU报告尾部(写级操作, 输出隔离到agent_tmp). "
