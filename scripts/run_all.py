@@ -4,9 +4,11 @@
 scripts/run_all.py — 一键跑全部测试
 
 分层:
-  --tier fast  (默认, 不耗token): selftest + 全部单测
+  --tier fast  (默认, 不耗token): selftest + 全部单测(含评测集自身的防线)
   --tier full  (耗token, ~15分钟): fast + MCP双向 + Web冒烟 + 升级E2E +
-                                   高级能力E2E + 金标准评测(23用例)
+                                   高级能力E2E + 金标准评测(28用例)
+只跑行为红线(最快的行为回归, ~3分钟):
+  python eval/run_eval.py --suite redline
 用法:
   python scripts/run_all.py            # 快速回归(秒级)
   python scripts/run_all.py --tier full
@@ -47,6 +49,7 @@ FAST = [
     ("任务契约四件套", [sys.executable, "scripts/test_task_contract.py"]),
     ("失败兜底文本", [sys.executable, "scripts/test_fallback.py"]),
     ("流程趋势工具", [sys.executable, "scripts/test_trend.py"]),
+    ("评测集防线", [sys.executable, "scripts/test_eval_set.py"]),
 ]
 FULL_EXTRA = [
     ("文件接口", [sys.executable, "scripts/test_files.py"]),

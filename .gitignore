@@ -11,6 +11,8 @@ uploads/
 .idea/
 
 .trash/
+# git bundle 备份(网络不通时防丢, 体积大且非源码)
+.backup/
 kb_cache/
 agent.db*
 

@@ -6,12 +6,22 @@ eval/run_eval.py — 金标准评测 runner
 用途: 每次换模型 / 改 prompt / 改工具描述 / 改引擎逻辑后, 跑一遍回归:
     python eval/run_eval.py                    # 全部套件
     python eval/run_eval.py --suite core       # 只跑核心(不依赖workmain插件)
+    python eval/run_eval.py --suite redline    # 只跑行为红线(用冻结快照, ~90s)
     python eval/run_eval.py --case arith_tool  # 只跑单用例
     python eval/run_eval.py --model glm-5.3    # 临时换模型对比
+
+套件分工:
+  core/workmain/ability  跑真实数据, 测「能不能把活干对」
+  redline                跑冻结快照, 测「会不会踩已知的坑」——
+                         每条对应一次真实事故(10-22 复读 / 10-23 跳过取数 /
+                         10-27 ⑥清零 / 10-29 编人名、口径混说、自切区间、技能不加载).
+                         用快照是为了让数字断言稳定: 真实报表每天变, 今天对明天错,
+                         那样的评测只能证明"今天碰巧对", 做不了改前改后对比.
 
 设计:
   - 断言式判定(确定性): 工具使用/回答包含/是否自然完成/LLM调用上限, 不用judge模型
   - 每用例独立会话+独立沙箱(cwd可指 fixtures 夹具目录), Yolo 策略跑批
+  - case.mock_tools 点名的工具换成返回 eval/fixtures/snapshots/ 冻结快照的桩
   - MEMORY.md 全程备份/恢复, 评测不污染记忆
   - 报告落 eval/reports/eval_<时间戳>.md, 退出码 0/1 可挂 CI
 """
@@ -47,7 +57,43 @@ def load_cases() -> list:
     return cases
 
 
+SNAPSHOTS = FIXTURES / "snapshots"
+
+
+def build_mock_registry(case: dict, base) -> object:
+    """把 case.mock_tools 里点名的工具换成返回冻结快照的桩.
+
+    为什么需要: 红线类断言要盯具体数字(如「必须引用 +3.4」), 而真实报表每天变,
+    今天对明天错 —— 那样的评测没法做「改前 vs 改后」对比, 只能证明"今天碰巧对".
+    冻结快照把数据这个变量消掉, 剩下的差异才只来自模型和提示词.
+
+    只替换点名的工具, 其余工具(schema 含 load_skill)保持原样 —— 题目不变,
+    只把数据源钉死.
+    """
+    mock = case.get("mock_tools") or {}
+    if not mock:
+        return base
+    reg = core.Registry()
+    for name in base.names():
+        if name in mock:
+            continue
+        t = base.get(name)
+        reg.register(core.Tool(t.name, t.description, t.parameters, t.level, t.func))
+    for name, fn in mock.items():
+        t = base.get(name)
+        if t is None:
+            raise RuntimeError(f"mock_tools 里的 {name!r} 在真实 registry 里不存在")
+        path = SNAPSHOTS / fn
+        if not path.exists():
+            raise RuntimeError(f"快照文件不存在: {path}")
+        text = path.read_text("utf-8", errors="replace")
+        reg.register(core.Tool(t.name, t.description, t.parameters, t.level,
+                               lambda **_kw: text))
+    return reg
+
+
 def run_case(case: dict, cfg: dict, registry, policy) -> dict:
+    registry = build_mock_registry(case, registry)
     root = ROOTS.get(case.get("cwd", "here"), HERE)
     core.set_root(root)
     # 清理上次运行留下的产物, 防止旧文件冒充本次交付物骗过 files 断言
@@ -189,7 +235,7 @@ def evaluate(case: dict, res: dict) -> list:
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="mini_agent 金标准评测")
-    ap.add_argument("--suite", choices=["core", "workmain", "ability", "all"],
+    ap.add_argument("--suite", choices=["core", "workmain", "ability", "redline", "all"],
                     default="all")
     ap.add_argument("--case", help="只跑指定 id 的用例")
     ap.add_argument("--model", help="临时覆盖模型名(对比用)")
@@ -269,7 +315,20 @@ def main():
         fails = "<br>".join(r["fails"]) if r["fails"] else ""
         lines.append(f"| {r['case']} | {'✅' if r['ok'] else '❌'} | "
                      f"{r['usage']['calls']} | {r['usage']['total_tokens']:,} | {fails} |")
-    lines += ["", f"> 失败用例的完整事件流见 `eval/sessions/eval_<id>.jsonl`"]
+
+    # 失败用例必须附答案原文 —— 只报「不应包含李杰华」而看不到它到底怎么写的,
+    # 等于让人猜. 诊断的第一步永远是看模型实际输出了什么.
+    bad = [r for r in rows if not r["ok"]]
+    if bad:
+        lines += ["", "## 失败详情", ""]
+        for r in bad:
+            lines += [f"### {r['case']}", "", "**失败断言**", ""]
+            lines += [f"- {f}" for f in r["fails"]]
+            ans = (r.get("answer") or "").strip()
+            lines += ["", "**答案原文**(截断 1500 字)", "", "```",
+                      ans[:1500] if ans else "(空)", "```", ""]
+    else:
+        lines += ["", "> 全部通过。"]
     rp.write_text("\n".join(lines), encoding="utf-8")
 
     print(f"\n[评测] 通过 {score}, 跳过 {skipped}, 总token {total_tok:,}, "
