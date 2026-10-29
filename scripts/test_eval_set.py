@@ -96,13 +96,32 @@ def main():
         reg = core.build_registry()
         core.load_plugins(reg, core.load_config())
         names = set(reg.names())
+        builtin = set(core.build_registry().names())
     except Exception as e:                      # 插件加载失败不该挡住评测集检查
         print(f"  (跳过: 插件加载失败 {type(e).__name__})")
-        names = None
+        names = builtin = None
     if names is not None:
         for c in rl:
             for tool in (c.get("mock_tools") or {}):
                 check(f"{c['id']}: 工具 {tool} 存在", tool in names, "mock_tools 拼错了")
+
+    print("\n== strict 隔离生效 ==")
+    # 2026-10-29 实测: 只 mock 了两个工具时, 模型从没 mock 的 scan_sync_data 读到
+    # 真实人名(李杰华/梁子锋), 于是「编造人名」判 FAIL 其实是误判 —— 它没编,
+    # 是查到了. strict 的作用就是把这条路封死, 让「数据世界」是封闭的.
+    # 这条检查失效的话, 评测会静默退化成「拿真数据测」, 不可重放.
+    if names is not None:
+        strict_cases = [c for c in rl if c.get("tool_scope") == "strict"]
+        check("至少一条用例用 strict(高风险场景)", bool(strict_cases),
+              "没人用 strict → 未 mock 的工具会泄真实数据")
+        for c in strict_cases:
+            r = ev.build_mock_registry(c, reg)
+            mock = set(c.get("mock_tools") or {})
+            leaked = set(r.names()) - builtin - mock
+            check(f"{c['id']}: strict 下无未 mock 的业务工具",
+                  not leaked, f"泄漏: {sorted(leaked)}")
+            check(f"{c['id']}: strict 下 mock 工具都在",
+                  mock <= set(r.names()), f"缺: {sorted(mock - set(r.names()))}")
 
     print("\n== 覆盖事故 ==")
     blob = " ".join(c.get("origin", "") for c in rl)

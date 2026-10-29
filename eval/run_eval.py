@@ -73,9 +73,18 @@ def build_mock_registry(case: dict, base) -> object:
     mock = case.get("mock_tools") or {}
     if not mock:
         return base
+    # strict: 只保留内置工具 + 本 case mock 的业务工具.
+    # 为什么需要: 2026-10-29 实测 rl_no_fake_names 判 FAIL, 以为是模型编人名,
+    # 查下来李杰华/梁子锋 是 scan_sync_data 里的真名 —— 模型没编, 是**从没 mock
+    # 的工具读到了真实数据**. 不封住这条路, 「编造」判定根本不可靠, 而且今天
+    # 查得到、明天数据变了查不到, 行为跟着漂, 做不了改前改后对比.
+    strict = case.get("tool_scope") == "strict"
+    builtin = set(core.build_registry().names())
     reg = core.Registry()
     for name in base.names():
         if name in mock:
+            continue
+        if strict and name not in builtin:
             continue
         t = base.get(name)
         reg.register(core.Tool(t.name, t.description, t.parameters, t.level, t.func))
