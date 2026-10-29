@@ -230,7 +230,9 @@ def register(registry, cfg: dict) -> int:
         import pandas as pd
         f = full("资产文件/商品资料.xlsx")
         if not f.exists():
-            return f"[错误] 找不到商品资料: {f}"
+            return (f"[错误] 商品资料文件不存在: {f}。"
+                    "处理: 检查 config.json 的 workmain_root 是否指向正确目录; "
+                    "不要猜 SKU 信息, 直接告诉用户「商品资料库不可用」。")
         df = pd.read_excel(f, header=1, dtype=str)  # 真实表头在第2行
         cols = [c for c in ("SKU", "ASIN", "英文品名", "中文品名", "型号",
                             "类型", "品牌", "供应商", "状态") if c in df.columns]
@@ -300,7 +302,9 @@ def register(registry, cfg: dict) -> int:
         try:
             lines = log_path.read_text("utf-8", errors="replace").splitlines()
         except OSError:
-            return "[错误] 日志不可读"
+            return ("[错误] 同步日志不可读(钉钉同步任务可能没在本机跑过)。"
+                    "处理: 改用 scan_sync_data 看数据本身的新鲜度; "
+                    "向用户说明「查不到同步日志」, 不要编造同步状态。")
         if not lines:
             return "⚠️ 日志为空, 无法判定"
         err_lines = [l for l in lines if "ERROR" in l or "Traceback" in l]
@@ -351,7 +355,10 @@ def register(registry, cfg: dict) -> int:
             return f"[错误] 同步目录不存在: {d} (可用 query_batches 查看可用批次)"
         files = _latest_parts(d)
         if not files:
-            return f"[错误] {d} 下没有 Part*.xlsx"
+            return (f"[错误] {d} 下没有 Part*.xlsx。"
+                    "处理: 多半是今天的同步任务还没跑完 —— ① 先看 sync_status 确认同步状态; "
+                    "② 明确告诉用户「数据尚未同步, 暂无今日数据」, 不要拿历史数据冒充今天; "
+                    "③ 如需近期情况, 用 inflight_report 读最近一份事中日报并注明日期。")
         today = pd.Timestamp(datetime.now().strftime("%Y-%m-%d"))
         done_vals = {"已结束", "终止"}
         dist_total, stale_rows, today_rows = {}, [], []
@@ -486,7 +493,10 @@ def register(registry, cfg: dict) -> int:
             return f"[错误] 同步目录不存在: {d} (可用 query_batches 查看可用批次)"
         files = _latest_parts(d)
         if not files:
-            return "[错误] 无Part文件"
+            return ("[错误] 无Part文件(同步目录里还没有 Part*.xlsx)。"
+                    "处理: ① 先看 sync_status 确认同步是否跑过; "
+                    "② 直接告诉用户「数据尚未同步」, 不要用历史数据冒充今天; "
+                    "③ 近期情况可读 inflight_report(昨日事中日报), 引用时注明日期。")
         today = pd.Timestamp(datetime.now().strftime("%Y-%m-%d"))
         since = today - pd.Timedelta(days=NEW_SKU_WINDOW_DAYS)
         targets = _part_targets()
