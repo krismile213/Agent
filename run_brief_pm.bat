@@ -13,8 +13,11 @@ rem    b) the morning task slips past 12:00, so it gets written as the
 rem       AFTERNOON segment and can clobber the real afternoon run.
 rem  Passing --pm makes it explicit and immune to when it actually runs.
 rem
-rem  Point the AgentDailyBriefPM scheduled task at THIS file. Keep
-rem  run_brief.bat for the morning run (and for ad-hoc clock-based reruns).
+rem  2026-11-01 update: the AgentDailyBriefPM scheduled task now calls
+rem  run_brief.bat directly with an explicit "--pm" argument, so the segment
+rem  label is visible right in Task Scheduler instead of hiding behind this
+rem  wrapper. This file stays as a MANUAL entry point:
+rem      call run_brief_pm.bat   ==   run_brief.bat --pm
 rem =====================================================================
 
 call "%~dp0run_brief.bat" --pm
