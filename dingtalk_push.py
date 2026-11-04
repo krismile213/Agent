@@ -102,10 +102,17 @@ def split_md(text: str, limit: int = MAX_MD_CHARS) -> list[str]:
     return chunks
 
 
+# 钉钉频控码: 410100 发送速率过快 / 130101 发送太快。这两类是可恢复的 ——
+# 2026-11-04 09:00 晨检只发 1 片也吃到了 410100, 旧代码直接判失败, 当天群里
+# 就没消息。逐片退避重试, 不要一次判定整条推送失败。
+_RATE_LIMIT_CODES = {410100, 130101}
+_RETRY_WAIT = (5, 15, 30)
+
+
 def send(title: str, text: str, limit: int = MAX_MD_CHARS) -> tuple[bool, str]:
     """发送 markdown 消息到配置的群机器人. 返回 (是否成功, 说明).
 
-    长文自动分片(钉钉单条有上限), 分片标题带 (i/n)。
+    长文自动分片(钉钉单条有上限), 分片标题带 (i/n); 频控错误自动退避重试。
     """
     pc = _load_push_config()
     if not pc["webhook"]:
@@ -117,14 +124,23 @@ def send(title: str, text: str, limit: int = MAX_MD_CHARS) -> tuple[bool, str]:
         head = f"### {title}" + (f" ({i}/{n})" if n > 1 else "")
         payload = {"msgtype": "markdown",
                    "markdown": {"title": title, "text": f"{head}\n\n{chunk}"}}
-        try:
-            r = requests.post(url, json=payload, timeout=15)
-            data = r.json()
-        except Exception as e:
-            return False, f"第{i}/{n}片请求异常: {e}"
-        if data.get("errcode") != 0:
-            return False, (f"第{i}/{n}片 errcode={data.get('errcode')} "
-                           f"{data.get('errmsg')}"
+        data = {}
+        for attempt in range(len(_RETRY_WAIT) + 1):
+            try:
+                r = requests.post(url, json=payload, timeout=15)
+                data = r.json()
+            except Exception as e:
+                return False, f"第{i}/{n}片请求异常: {e}"
+            code = data.get("errcode")
+            if code == 0:
+                break
+            if code in _RATE_LIMIT_CODES and attempt < len(_RETRY_WAIT):
+                wait = _RETRY_WAIT[attempt]
+                print(f"[推送] 第{i}/{n}片 频控 errcode={code}, {wait}s 后重试 "
+                      f"({attempt + 1}/{len(_RETRY_WAIT)})")
+                time.sleep(wait)
+                continue
+            return False, (f"第{i}/{n}片 errcode={code} {data.get('errmsg')}"
                            " (若为关键词校验失败, 请把机器人关键词加进消息标题)")
     return True, (f"已发送({n}片)" if n > 1 else "已发送")
 

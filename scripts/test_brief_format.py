@@ -8,6 +8,7 @@
 故在 daily_brief.normalize_brief_md 里做了确定性兜底, 本文件钉住它的行为。
 """
 
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -361,8 +362,14 @@ def test_duplicate_section_header_collapsed():
 
 
 def test_brief_health_signals():
-    """体检要能抓住本次三种病征, 干净正文不许误报。"""
-    dirty = ("## ⑤ 已超期与环节停滞TOP\n"
+    """体检要能抓住本次三种病征, 干净正文不许误报。
+
+    2026-11-04 调整: 复读行 / 括号未闭合只查模型写的 ①②⑥。③④⑤ 是代码按
+    工具输出渲染的数据段, 段级口径下同一 SKU 会在多环节重复出现(相邻两行
+    一字不差), 判成"模型复读"会每天触发一次无谓重修 —— 11-02~04 就是这么
+    把三节修成 "[系统自动填充]" 的。所以脏数据样本改放在 ② 段。
+    """
+    dirty = ("## ② 今日动态\n"
              "• G589 vivo S2 5G [到货: 亚马逊墨西哥 F\n"
              "严格遵守格式要求\n"
              "x\nx\nx\n")
@@ -372,6 +379,14 @@ def test_brief_health_signals():
     check("体检: 抓到括号未闭合", "括号未闭合" in joined, extra=joined)
     check("体检: 抓到连续重复行", "重复行" in joined, extra=joined)
     check("体检: 空正文报错", db.brief_health("  ") == ["正文为空"])
+    # 同样的病征出现在渲染段(③)时不许报警: 那是数据特性, 不是模型故障
+    rendered = ("## ③ 新增SKU与签样追踪\n"
+                "• G563 Part8 停滞120天/目标35天 (超85天)\n"
+                "• G563 Part8 停滞120天/目标35天 (超85天)\n"
+                "• G563 Part8 停滞120天/目标35天 (超85天)\n")
+    rj = " ".join(db.brief_health(rendered))
+    check("体检: 渲染段的重复行不误报", "重复行" not in rj, extra=rj)
+    check("体检: 渲染段不误报括号未闭合", "括号未闭合" not in rj, extra=rj)
     clean = ("## ⑤ 已超期与环节停滞TOP\n\n已超期 22 个; 另历史遗留 69 个不列\n"
              "• G591 Honor Robot Phone 5G 已超5天[空运]\n\n"
              "环节停滞TOP 228单 (段级停滞=距最后更新vs环节目标)\n"
@@ -571,6 +586,46 @@ def test_replace_data_sections_overrides_garbage():
     check("覆盖: 标题只出现一次", out.count("⑤ 已超期与环节停滞TOP") == 1)
 
 
+def test_placeholder_sections_never_reach_disk():
+    """2026-11-02~04 事故: 体检误判触发重修, 模型把 ③④⑤ 写成占位符并落盘。
+
+    两道防线各测一次:
+      1) normalize 直接丢掉占位符行 —— 宁可暂时空一节, 也不留"[系统自动填充]";
+      2) replace_data_sections 用工具渲染覆盖回真实条目。
+    """
+    raw = ("## ① 同步状态与数据截至\n\n• ✅ 最近同步成功\n\n"
+           "## ② 今日动态\n\n• 今日无新增动态\n\n"
+           "## ③ 新增SKU与签样追踪\n\n[系统自动填充]\n\n"
+           "## ④ 临期预警\n\n（由系统填充）\n\n"
+           "## ⑤ 已超期与环节停滞TOP\n\n[系统自动填充]\n\n"
+           "## ⑥ 行动建议\n\n• G594 需催 Part8\n")
+    norm = db.normalize_brief_md(raw)
+    check("占位符: normalize 后不留 [系统自动填充]", "系统自动填充" not in norm, extra=norm[:200])
+    check("占位符: normalize 后不留 （由系统填充）", "由系统填充" not in norm)
+    check("占位符: 六节标题都还在",
+          all(re.search(rf"^#{{2,4}}\s*{n}", norm, re.M) for n in "①②③④⑤⑥"),
+          extra=norm[:200])
+    out, hit = db.replace_data_sections(norm, _TOOL_OUT)
+    check("占位符: 替换后 ③④⑤ 都有条目",
+          all(db._section_text(out, n).count("•") > 0 for n in "③④⑤"),
+          extra=str(hit))
+
+
+def test_render_dedupes_identical_rows():
+    """同一 SKU 同一环节在工具输出里出现两行一字不差 → 渲染时只留一条。
+
+    不去重的话简报里会出现"复读", 还会让 brief_health 误判成模型故障 ——
+    2026-11-02~04 三天的占位符事故就是从这 3 组重复行开始的。
+    """
+    dup_tool = ("== 环节停滞超目标(段级口径: 距最后更新vs环节目标, 3单, 行级可重复) TOP ==\n"
+                "  G563 Part8 停滞120天/目标35天 (超85天)\n"
+                "  G563 Part8 停滞120天/目标35天 (超85天)\n"
+                "  G562 Part8 停滞120天/目标35天 (超85天)\n")
+    r = db.render_data_sections(dup_tool)["⑤"]
+    check("去重: 相同行只留一条", r.count("G563 Part8 停滞120天") == 1, extra=r)
+    check("去重: 不同 SKU 都保留", "G562" in r and "G563" in r, extra=r)
+
+
 def test_replace_data_sections_inserts_missing():
     """模型漏写 ③⑤(现在允许它不写) → 按序补上, 顺序不乱。"""
     md = ("## ① 同步状态与数据截至\n\n• 同步正常\n\n"
@@ -685,6 +740,8 @@ def main():
                test_render_data_sections,
                test_render_data_sections_zero_warn,
                test_replace_data_sections_overrides_garbage,
+               test_placeholder_sections_never_reach_disk,
+               test_render_dedupes_identical_rows,
                test_replace_data_sections_inserts_missing,
                test_replace_data_sections_h3_level,
                test_brief_health_requires_all_sections,

@@ -138,6 +138,12 @@ SECTION_TITLES = {
 _SEC_LEAD = re.compile(r"^(#{1,6})\s*")
 _SEC_NO = re.compile(r"^([①②③④⑤⑥])")
 _WARN_LINE = re.compile(r"^数据已.*未同步")     # ① 顶部的"数据断供"警示句, 保持普通段落
+# ③④⑤ 的占位符: 模型有时不写条目, 只留一句「[系统自动填充]」。(2026-11-02~04
+# 实测: 体检误判触发重修后, 模型把这三节全写成占位符, 而替换只在体检前跑过一次,
+# 占位符直接落盘推群。) 这类行本身没有信息, 一律丢弃, 正文由确定性渲染补。
+_PLACEHOLDER = re.compile(
+    r"^[\s\[\(（【]*\s*(?:系统自动填充|由系统填充|系统填充|待系统填充|"
+    r"自动填充|待填充|系统生成|placeholder|auto-?fill)\s*[\s\]\)）】]*$", re.I)
 
 
 def _canon_section(s: str):
@@ -270,7 +276,13 @@ def brief_health(md: str, tool_out: str | None = None,
     echo = [m for m in _ECHO_MARKS if m in md]
     if echo:
         probs.append(f"含提示词回声({echo[0]})")
-    lines = [l.strip() for l in md.split("\n") if l.strip()]
+    # 复读行只查模型写的 ①②⑥。③④⑤ 是代码渲染的数据段, 段级口径下同一 SKU
+    # 会在多环节重复出现, "相邻两行一个字不差"属于数据特性而不是模型故障。
+    # 判错代价很大: 会触发一次整篇重修 —— 2026-11-02~04 就是这么把 ③④⑤
+    # 修成 "[系统自动填充]" 的(替换只在体检之前跑过一次, 没人再覆盖)。
+    model_text = (_section_text(md, "①", "②") + _section_text(md, "②", "③")
+                  + _section_text(md, "⑥"))
+    lines = [l.strip() for l in model_text.split("\n") if l.strip()]
     dup = sum(1 for a, b in zip(lines, lines[1:]) if a == b)
     if dup >= 2:
         probs.append(f"连续重复行 {dup} 处")
@@ -333,6 +345,8 @@ def normalize_brief_md(answer: str) -> str:
         if not s:
             out.append(line)
             continue
+        if _PLACEHOLDER.match(s):
+            continue                                  # ③④⑤ 占位符: 内容由渲染补, 不留空话
         sec = _canon_section(s)                       # 小节标题 → 规范短标题
         if sec:
             cur, title = sec
@@ -509,14 +523,25 @@ def _pa_sections(tool_out: str) -> dict:
 
 
 def _pa_items(lines) -> tuple:
-    """条目行(两空格缩进) → (条目列表, 尾注列表)。尾注如「未签样待跟进 4 个…」。"""
+    """条目行(两空格缩进) → (条目列表, 尾注列表)。尾注如「未签样待跟进 4 个…」。
+
+    这里做**保序去重**：同一 SKU 的同一环节在工具输出里偶尔出现两行完全相同
+    (同 SKU 多张单), 直接渲染出去就是第 5 行和第 6 行一个字不差 —— 看起来像
+    模型复读, 还会让 brief_health 的「连续重复行」误判成模型故障, 触发一次
+    无谓的整篇重修。2026-11-02~04 实测: 那次重修把 ③④⑤ 写成了
+    "[系统自动填充]" 占位, 而替换只在体检之前跑过一次, 占位符直接落盘。
+    顺序本身有含义(按天数排序), 所以只去完全相同的行, 不排序。
+    """
     items, notes = [], []
     for l in lines:
         m = _PA_ITEM.match(l)
         if not m:
             continue
         t = m.group(1).strip()
-        (notes if t.startswith("未签样待跟进") else items).append(t)
+        bucket = notes if t.startswith("未签样待跟进") else items
+        if t in bucket:
+            continue
+        bucket.append(t)
     return items, notes
 
 
@@ -1036,6 +1061,20 @@ def main():
             if len((md or "").strip()) > PM_DELTA_SOFT_MAX:
                 print(f"[{tag}] ⚠️ 增量正文 {len(md)} 字(> {PM_DELTA_SOFT_MAX}), "
                       f"模型可能重抄了基线; 已照写, 下次留意")
+
+        if not delta:
+            # 收尾重渲染: 上面的修复链会让模型把整篇重写一遍, 而 ③④⑤ 的替换
+            # 只在最前面做过一次 —— 模型重写时会把这三节写成 "[系统自动填充]"
+            # 之类占位(2026-11-02~04 实际事故, 连续三天落盘都是占位符)。
+            # 数据段是代码真源, 只要取到就无条件覆盖回去, 幂等且无副作用;
+            # 取不到(pipeline_alerts 为空)就保持现状, 不做破坏性清理。
+            try:
+                md, hit2 = replace_data_sections(
+                    md, prefetched.get("pipeline_alerts", ""))
+                if hit2:
+                    print(f"[{tag}] ③④⑤ 收尾重渲染: {'/'.join(hit2)}")
+            except Exception as e:                  # noqa: BLE001
+                print(f"[{tag}] 收尾重渲染跳过: {e}")
         return md
 
     transcript = core.Transcript(f"brief_{now.strftime('%Y%m%d')}{suffix}")
