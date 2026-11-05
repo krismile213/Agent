@@ -35,6 +35,7 @@ FAST = [
     ("失败模式复盘单测", [sys.executable, "scripts/test_session_analysis.py"]),
     ("空简报防线", [sys.executable, "scripts/test_brief_guard.py"]),
     ("简报格式兜底", [sys.executable, "scripts/test_brief_format.py"]),
+    ("Part环节名/素材通用", [sys.executable, "scripts/test_part_stage.py"]),
     ("钉钉推送换行/分片", [sys.executable, "scripts/test_dingtalk_format.py"]),
     ("Web新增端点", [sys.executable, "scripts/test_web_features.py"]),
     ("Web前端装配防线", ["node", "scripts/test_web_ui.js"]),

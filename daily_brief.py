@@ -651,6 +651,55 @@ def replace_dynamic_section(md: str, tool_out: str) -> tuple:
     return md[:m.end()] + "\n\n" + body + "\n\n" + md[end:], True
 
 
+_SKU_COUNT = re.compile(r"共\s*(\d+)\s*个\s*SKU")
+_SKU_SPAN = re.compile(r"(G\d{3,4})\s*[-–—~至]\s*G?(\d{3,4})")
+
+
+def _count_skus(line: str) -> int:
+    """一行里实际点名的 SKU 数: 区间写法(G594-G597)按序号展开, 单个 SKU 直接计入, 去重。"""
+    seen = set()
+    for a, b in _SKU_SPAN.findall(line):
+        try:
+            lo, hi = int(a[1:]), int(b)
+        except ValueError:
+            continue
+        if lo <= hi and hi - lo <= 200:          # 防离谱区间(如 G001-999)撑爆
+            seen.update(f"G{i:03d}" for i in range(lo, hi + 1))
+    for g in _SKU_RE.findall(line):
+        seen.add(g)
+    return len(seen)
+
+
+def fix_sku_counts(md: str) -> tuple:
+    """校正 ⑥ 里「共N个SKU」的数量 —— 按该条实际点名的 SKU 重算。
+
+    2026-11-05 实测: 「G594-G597、G592-G593、G587 共8个SKU」实际只有 7 个
+    (4+2+1), 多报 1 个。提示词已经写了「N 必须等于实际点名数」, 但模型不会数,
+    这类可算的东西不该交给它 —— 与 ④⑤ 的 apply_counts 同一个思路。
+    只认「共N个」: 「等N个」表示列举未完, 实际总数无法从这一行推出, 不能改。
+    """
+    sec = _section_text(md, "⑥")
+    if not sec.strip():
+        return md, 0
+    out_lines, fixed = [], 0
+    for ln in sec.split("\n"):
+        if ln.strip().startswith("•"):
+            m = _SKU_COUNT.search(ln)
+            if m:
+                actual = _count_skus(ln)
+                if actual and int(m.group(1)) != actual:
+                    print(f"[⑥] 数量校正: 共{m.group(1)}个 → 共{actual}个")
+                    ln = ln[:m.start(1)] + str(actual) + ln[m.end(1):]
+                    fixed += 1
+        out_lines.append(ln)
+    if not fixed:
+        return md, 0
+    idx = md.find(sec)
+    if idx < 0:
+        return md, 0
+    return md[:idx] + "\n".join(out_lines) + md[idx + len(sec):], fixed
+
+
 def drop_ghost_skus(md: str, tool_out: str) -> tuple:
     """删掉 ⑥ 里引用了「工具输出中不存在的 SKU」的条目 —— 编造残留的兜底。
 
@@ -871,7 +920,15 @@ TASK_TEMPLATE = """今日{tag}({date})。数据口径: data/手机膜/手机膜 
 - scan_sync_data 的「今日有动态」是 ② 的唯一来源: 有明细就逐条给
   SKU + 型号 + Part + 最新节点 + 当前负责人; 写 "0 单" 就写 "• 今日无新增动态"。
 - pipeline_alerts 的「Part9新单待办」可作为 ② 的补充, 工具只给 4 个字段, 不要补。
-- ⑥ ≤3 条, 必须指向上面真实出现过的 SKU: 谁、卡在哪个环节、要做什么、什么时候前完成。
+- ⑥ ≤3 条, 必须指向上面真实出现过的 SKU: 谁、卡在哪个环节、要做什么。
+  环节照抄工具给的「卡PartX·环节名」——**不许把 Part 编号自行改写成「审批」**:
+  到货类(Part3/Part8)是物流动作(催到货/检查/入仓), 只有审批类环节才催审批。
+- ⑥ 不许编数字: 写「N个SKU」时 N 必须等于该条实际点名的 SKU 数; 拿不准就不写数量。
+- ⑥ 不许编截止日期: 工具没有目标完成日。要表达紧迫就引用工具给的
+  「剩N天」「已超N天」「停滞N天」, 不要自己换算成「X月X日前完成」。
+- 素材通用(条目带 [素材通用])按短路径给建议: 跳过寄送/拍摄/素材加工三段,
+  由本地仓到货直接推上架 Listing + 广告; 卡在 Part3(本地仓到货检查)的要写明
+  它会拖死 Part6 素材段(Part3 不过, Part6 单据建不出来)。
 
 **不要编造**: SKU、型号、人名、时间戳、Part 名称逐字来自工具输出; 工具没给的宁可不写。
 格式不用操心 —— 结构、列表符号、标题都由代码统一, 写平实的短句即可。
@@ -890,6 +947,8 @@ PM_TEMPLATE = """现在是当日午后更新({date} {hhmm})。今天上午已出
 - ⑥ 必须承接晨检待办: 对着当前数据把晨检 ⑥ 的每条核一遍 —— 涉及的 SKU 还在
   审批中/仍卡原环节, 就原样保留并标 "(晨检提出, 仍未推进)"; 确实推进了写明到了哪一步。
   这一组不许因为"下午没新变化"就清空。再补因今天新增动态/新增SKU而多出来的动作(≤2 条)。
+- ⑥ 同样不许编: 环节照抄工具给的「卡PartX·环节名」(别把 Part 编号改写成「审批」),
+  写「N个SKU」时 N 必须等于实际点名的 SKU 数, 不要编「X月X日前完成」这类目标日。
 - ④⑤ 的总数由系统按工具输出校正, 你不要写数字; 不要列 SKU(基线段就在上方)。
 
 **不要编造**, 不要背景解释, 不写"总体平稳"这类套话。格式由代码统一, 写短句即可。
@@ -1075,6 +1134,14 @@ def main():
                     print(f"[{tag}] ③④⑤ 收尾重渲染: {'/'.join(hit2)}")
             except Exception as e:                  # noqa: BLE001
                 print(f"[{tag}] 收尾重渲染跳过: {e}")
+        # ⑥ 的「共N个SKU」按实际点名数校正 —— 放在最后, 因为上面的修复链可能
+        # 重写整篇, 也可能删掉幽灵 SKU, 数量要按最终文本算(模型自己数不准)。
+        try:
+            md, n_fix = fix_sku_counts(md)
+            if n_fix:
+                print(f"[{tag}] ⑥ 数量校正 {n_fix} 条")
+        except Exception as e:                      # noqa: BLE001
+            print(f"[{tag}] ⑥ 数量校正跳过: {e}")
         return md
 
     transcript = core.Transcript(f"brief_{now.strftime('%Y%m%d')}{suffix}")

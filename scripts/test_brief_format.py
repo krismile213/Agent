@@ -495,6 +495,32 @@ def test_render_dynamic_section():
           extra=str(db.brief_health(new, pa + "\n" + scan0)))
 
 
+def test_fix_sku_counts():
+    """⑥ 的「共N个SKU」按实际点名数重算 —— 模型数不准, 这类可算的不该交给它。
+
+    2026-11-05 实测原文: 「G594-G597、G592-G593、G587 共8个SKU」实际 7 个(4+2+1)。
+    """
+    md = ("## ⑥ 行动建议\n\n"
+          "• G594-G597、G592-G593、G587 共8个SKU已超期8-20天 (均卡Part8)\n"
+          "• G604、G606、G607 共3个SKU待审批\n"
+          "• G598 剩10天[空运], 需催促渠道仓到货检查\n")
+    out, n = db.fix_sku_counts(md)
+    check("⑥ 数量: 区间4+2+单1 → 共7个", "共7个SKU" in out, extra=out)
+    check("⑥ 数量: 本来正确的 共3个 不动", "共3个SKU" in out, extra=out)
+    check("⑥ 数量: 只改 1 条", n == 1, extra=str(n))
+    check("⑥ 数量: 无「共N个」的行不动", "G598 剩10天" in out, extra=out)
+
+    # 「等N个」表示列举未完, 真实总数推不出来 —— 宁可不改, 也不能改错
+    md2 = "## ⑥ 行动建议\n\n• G594、G595 等5个SKU需处理\n"
+    out2, n2 = db.fix_sku_counts(md2)
+    check("⑥ 数量: 「等N个」不校正(总数不可推)", "等5个SKU" in out2 and n2 == 0,
+          extra=out2)
+
+    # 没有 ⑥ 段时安全返回
+    out3, n3 = db.fix_sku_counts("## ① 同步\n• 正常\n")
+    check("⑥ 数量: 无⑥段安全返回", n3 == 0 and "同步" in out3)
+
+
 def test_drop_ghost_action_items():
     """⑥ 顺着编造的 ② 写出的行动建议, 按 SKU 白名单删掉。"""
     tool_out = "  G598 Xiaomi Redmi 17 4G/5G (创建 09-16)\n  G600 Xiaomi 18 Pro 5G\n"
@@ -737,6 +763,7 @@ def main():
                test_scrub_consecutive_repeats, test_duplicate_section_header_collapsed,
                test_brief_health_signals,                test_health_detects_fabricated_skus, test_render_dynamic_section,
                test_drop_ghost_action_items, test_carry_over_actions,
+               test_fix_sku_counts,
                test_render_data_sections,
                test_render_data_sections_zero_warn,
                test_replace_data_sections_overrides_garbage,

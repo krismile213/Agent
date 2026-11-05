@@ -54,6 +54,33 @@ INFLIGHT_CLIP = 4200
 SIGN_TARGET_FILM = 12
 SIGN_TARGET_SHELL = 87
 
+# Part 编号 → 业务环节名(单一真源, 与数据后台 seg_rules.NODES 对齐)。
+# 2026-11-05 加: 只给编号不给环节名时, 模型会把「卡Part8」自行脑补成「Part8审批」
+# (实测 11-05 晨检 ⑥ 三条建议全写成"完成Part8审批/催办Part8审批"), 而 Part8 是
+# **渠道仓到货检查**(物流入库), 根本没有审批动作 —— 催错对象比不催更糟。
+# 顺序即流程顺序, 但注意 Part3(本地仓到货) 与 Part6(寄送拍摄) 是硬依赖:
+# Part3 的到货检查不通过, Part6 单据根本建不出来(见下方 GENERIC_MATERIAL 注释)。
+PART_STAGE = {
+    "Part1": "提案/取数",
+    "Part2": "签样/采购下单",
+    "Part3": "本地仓到货检查",
+    "Part4": "首次上架",
+    "Part5": "发货",
+    "Part6": "寄送拍摄/素材加工",
+    "Part7": "上架/广告",
+    "Part8": "渠道仓到货检查",
+    "Part9": "新单审批",
+}
+
+# 素材通用判定(与数据后台 `backend/app/generic_material.py` 同源, 改口径两边一起改)。
+# 依据: ①「是否决定拍摄=否」或 ②「素材参考SKU/型号非空」→ 通用(复用已有素材);
+#       「是否决定拍摄=是」→ 不通用; 全未填 → 保守按不通用。
+# 业务含义(2026-11-05 用户口径): 通用 = 跳过 Part6 的寄送→拍摄交付→素材加工三段,
+# 由「本地仓到货」直接进「上架 Listing + 广告」, 省 18 天(5+10+3)。
+# ⚠️ 默认不通用: Part6 单据要到 Part3 完成后才建, 此前「是否决定拍摄」无处可填,
+#    默认通用等于凭空抹掉 18 天路径。
+GENERIC_MATERIAL_SAVE_DAYS = 18   # 签样→寄送5 + 寄送→拍摄交付10 + 拍摄交付→素材加工3
+
 # 路线复盘两套口径 → 汇总xlsx文件 (口径语义: action=动作映射 / system=系统业务时间列)
 ROUTE_FILES = {
     "action": "route_路线复盘_复盘文件.xlsx",
@@ -181,6 +208,81 @@ def _part8_shipments(part_files) -> dict:
     return out
 
 
+def _generic_material_map(part_files) -> dict:
+    """Part6(素材)表 → {sku: (是否通用, 判定依据)}。
+
+    与数据后台 `backend/app/generic_material.py: judge()` **同一判据**（那边是单一真源，
+    改口径两边一起改）：按单据创建时间倒序，取第一条能定性的记录 ——
+      ① 是否决定拍摄=否            → 通用
+      ② 素材参考SKU/型号非空        → 通用
+      ③ 是否决定拍摄=是            → 不通用
+      ④ 全未填                     → 不通用(保守默认, 见 GENERIC_MATERIAL 注释)
+
+    缺文件/缺列返回 {} —— 调用方必须把「查不到」和「不通用」分开, 不能混为一谈。
+    """
+    import pandas as pd
+    f6 = next((f for f in part_files if f.stem.startswith("Part6")), None)
+    if f6 is None:
+        return {}
+    try:
+        df = pd.read_excel(f6, dtype=str)
+    except Exception:
+        return {}
+    sku_col = next((c for c in df.columns if "SKU" in str(c).upper()), None)
+    if sku_col is None:
+        return {}
+    c_decide, c_ref_sku = "是否决定拍摄", "素材参考SKU"
+    c_ref_model, c_create = "素材参考型号", "创建时间"
+    created = (pd.to_datetime(df[c_create], errors="coerce")
+               if c_create in df.columns else None)
+    rows: dict = {}
+    for i in range(len(df)):
+        r = df.iloc[i]
+        sku = _s(r.get(sku_col))
+        if not sku:
+            continue
+        c = created.iloc[i] if created is not None else None
+        rows.setdefault(sku, []).append((c if c is not None and pd.notna(c)
+                                         else pd.Timestamp.min, r))
+    out: dict = {}
+    for sku, lst in rows.items():
+        lst.sort(key=lambda x: x[0], reverse=True)   # 最新单据优先
+        decided = None
+        for _, r in lst:
+            decide = _s(r.get(c_decide))
+            ref_sku, ref_model = _s(r.get(c_ref_sku)), _s(r.get(c_ref_model))
+            if decide == "否" or ref_sku or ref_model:
+                basis = []
+                if decide == "否":
+                    basis.append("是否决定拍摄=否")
+                if ref_sku or ref_model:
+                    basis.append(f"素材参考={ref_sku or ref_model}")
+                decided = (True, "；".join(basis))
+                break
+            if decide == "是":
+                decided = (False, "是否决定拍摄=是(需真机拍摄)")
+                break
+        out[sku] = decided or (False, "未标注拍摄/参考(默认按需拍摄)")
+    return out
+
+
+def _material_tag(gmat: dict, sku: str, part: str) -> str:
+    """把素材通用状态渲染成条目后缀 —— 只在「还没走到/正卡在 Part6」时才有意义。
+
+    已过 Part6 的 SKU(卡 Part7/Part8)标了是噪声: 素材早就交付了, 通用与否改不了当前动作。
+    卡在 Part1~Part5 且通用 → 标注「可跳过素材段」, 直接推上架/广告; 需拍摄则标「需拍摄」。
+    """
+    if part not in ("Part1", "Part2", "Part3", "Part4", "Part5", "Part6"):
+        return ""      # 含空值: 环节未知时不标注(宁缺勿错)
+    got = gmat.get(sku)
+    if got is None:
+        return ""
+    generic, basis = got
+    if generic:
+        return f" [素材通用·可跳过拍摄, 省{GENERIC_MATERIAL_SAVE_DAYS}天]"
+    return f" [需拍摄: {basis}]"
+
+
 def _ship_tag(ship_map: dict, sku: str, limit: int = 3) -> str:
     """把某 SKU 的 (地区, 货件号) 列表渲染成一行标注; 超过 limit 个折叠为「共N个」。"""
     lst = ship_map.get(sku)
@@ -191,6 +293,17 @@ def _ship_tag(ship_map: dict, sku: str, limit: int = 3) -> str:
     return f" [到货: {shown}{more}]"
 
 
+def _stage_label(part: str) -> str:
+    """Part 编号 → 「Part8(渠道仓到货检查)」; 未知编号原样返回。
+
+    所有面向模型/用户的输出都走这里 —— 只给裸编号时模型会自行脑补动作
+    (2026-11-05: 把「卡Part8」写成「完成Part8审批」, 而 Part8 是到货检查).
+    ⚠️ 别叫 _part_label: 那个名字已被「文件名→'Part2 新品首单下单'」占用(上方)。
+    """
+    stage = PART_STAGE.get(part)
+    return f"{part}({stage})" if stage else part
+
+
 def _stage_of(info: dict, targets: dict, modes: dict, sku: str, today) -> str:
     """已签样 SKU 的「最新状态」: 当前环节 + 已持续N天 + 时效M天; 无在途段则「已闭环」。"""
     import pandas as pd
@@ -198,14 +311,15 @@ def _stage_of(info: dict, targets: dict, modes: dict, sku: str, today) -> str:
     if not pend:
         return "已闭环"
     part = "Part" + max(pend)
+    part_label = _stage_label(part)
     tgt = targets.get(part, 1)
     if part == "Part8" and modes.get(sku) == "sea":
         tgt = 35
     last = info.get("last_up")
     if last is None or pd.isna(last):
-        return f"现{part} 时效{tgt}天"
+        return f"现{part_label} 时效{tgt}天"
     days = int((today - last.normalize()).days)
-    return f"现{part} 已持续{days}天/时效{tgt}天"
+    return f"现{part_label} 已持续{days}天/时效{tgt}天"
 
 
 def register(registry, cfg: dict) -> int:
@@ -422,7 +536,8 @@ def register(registry, cfg: dict) -> int:
         for pl, sku, model, st, node, owner in today_rows[:8]:
             mid = f" {model}" if model and model != sku else ""
             tail = f" | 当前负责人:{owner}" if owner else ""
-            lines.append(f"  · {sku}{mid} @ {pl} | 状态:{st} | 最新节点: {node}{tail}")
+            lines.append(f"  · {sku}{mid} @ {_stage_label(pl)} | 状态:{st} | "
+                         f"最新节点: {node}{tail}")
         if len(today_rows) > 8:
             lines.append(f"  …另有 {len(today_rows) - 8} 单今日动态未列出")
         stale_rows.sort(reverse=True)
@@ -433,7 +548,8 @@ def register(registry, cfg: dict) -> int:
                      f">{STALE_CAP_DAYS}天历史遗留 {len(zombie)} 单(多为悬挂老单), 不列入TOP)")
         lines.append(f"近{STALE_CAP_DAYS}天内停滞TOP (口径=距最后更新天数; 同一SKU在多环节会重复出现):")
         for days, sku, part, st, t in recent[:max(1, min(int(top), 15))]:
-            lines.append(f"  {sku} {part} 停滞{days}天 (状态:{st}, 最后更新:{t})")
+            lines.append(f"  {sku} {_stage_label(part)} 停滞{days}天 "
+                         f"(状态:{st}, 最后更新:{t})")
         return clip("\n".join(lines), 3500)
 
     # 权威表与运输模式缓存(进程内)
@@ -509,6 +625,7 @@ def register(registry, cfg: dict) -> int:
         targets = _part_targets()
         modes = _sku_modes()
         ship = _part8_shipments(files)   # sku -> [(到货渠道仓, 货件号)] 供临期/超期标注
+        gmat = _generic_material_map(files)  # sku -> (素材是否通用, 依据) 供判路径长短
         FULL = {"air": 60, "sea": 69}
         skus = {}   # sku -> {model, start, pending:set, created, last_up, sign}
         seg_rows = []  # (超目标天数, idle, sku, part, target)
@@ -635,7 +752,17 @@ def register(registry, cfg: dict) -> int:
                # 模型看到的是"工具明确说没有", 不是"我忘了查"。
                "责任人字段: 只有 Part9 新单带「当前负责人」(审批人); 其余环节本工具"
                "**不提供任何责任人姓名**。要催办就写岗位/环节(如「签样责任人」「采购下单」), "
-               "表格里没有的列写「未记录」或直接删掉该列 —— 不许用岗位倒推人名。"]
+               "表格里没有的列写「未记录」或直接删掉该列 —— 不许用岗位倒推人名。",
+               # 2026-11-05: 只给 Part 编号时, ⑥ 把「卡Part8」写成「完成Part8审批」——
+               # Part8 是渠道仓到货检查(物流入库), 没有审批动作。把编号对应的业务动作
+               # 直接印在输出里, 模型照抄即可, 没有自行解释的余地。
+               "Part编号=环节: " + " · ".join(f"{k}{v}" for k, v in PART_STAGE.items())
+               + "。括号里的环节名就是该环节真实业务动作, 写建议时照抄, "
+                 "**不许把 Part 编号自行改写成「审批」或别的动作**。",
+               "流程依赖(2026-11-05 业务确认): Part3 本地仓到货检查不通过 → Part6 单据"
+               "建不出来, 卡 Part3 会直接拖死素材段; 素材通用的 SKU(条目末尾带"
+               "[素材通用])可跳过 Part6 的寄送→拍摄→素材加工三段(共"
+               f"{GENERIC_MATERIAL_SAVE_DAYS}天), 由本地仓到货直接进上架 Listing + 广告。"]
         stale_warn = _stale_note(fresh_time)
         if stale_warn:
             out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
@@ -665,12 +792,14 @@ def register(registry, cfg: dict) -> int:
                        f"最久 {wait_sign[0][1]}({wait_sign[0][0]}天)")
         out.append(f"\n== 临期预警(剩≤{warn_days}天, {len(warn_list)}个) ==")
         for left, sku, mv, stuck, s, tag in warn_list[:n]:
-            out.append(f"  {sku} {mv} 剩{left}天[{tag}] (启动{s:%m-%d}, 卡{stuck})"
-                       + _ship_tag(ship, sku))
+            out.append(f"  {sku} {mv} 剩{left}天[{tag}] "
+                       f"(启动{s:%m-%d}, 卡{_stage_label(stuck)})"
+                       + _material_tag(gmat, sku, stuck) + _ship_tag(ship, sku))
         out.append(f"\n== 已超期(超全流程线, {len(over_list)}个; 另历史遗留{legacy}个不列) ==")
         for over, sku, mv, stuck, s, tag in over_list[:n]:
-            out.append(f"  {sku} {mv} 已超{over}天[{tag}] (启动{s:%m-%d}, 卡{stuck})"
-                       + _ship_tag(ship, sku))
+            out.append(f"  {sku} {mv} 已超{over}天[{tag}] "
+                       f"(启动{s:%m-%d}, 卡{_stage_label(stuck)})"
+                       + _material_tag(gmat, sku, stuck) + _ship_tag(ship, sku))
         out.append(f"\n== 环节停滞超目标(段级口径: 距最后更新vs环节目标, {len(seg_rows)}单, 行级可重复) TOP ==")
         for over_t, idle, sku, part, tgt in seg_rows[:n]:
             out.append(f"  {sku} {part} 停滞{idle}天/目标{tgt}天 (超{over_t}天)")
@@ -775,11 +904,36 @@ def register(registry, cfg: dict) -> int:
             return f"[错误] 打不开 {f.name}: {e} (文件可能正被 Excel/WPS 占用)"
 
         def _sheet(sn):
-            """header=2: row0 标题 / row1 空 / row2 表头(平台写入结构, 勿改)。"""
+            """按「SKU 表头所在行」自适应读取 —— 不能写死 header=2。
+
+            平台 2026-10-29 在 row1 插了一行图例(状态「超期❗」等的解释),
+            表头就从 row2 下移到 row3。写死 header=2 时 11-04 起的日报整表读错
+            (列名变成第一条数据, 于是「在研状态总表」解析不出汇总行,
+            pipeline_trend 的「这周 vs 上周」整段变空 —— 2026-11-05 实测)。
+            扫前 8 行找同时含「SKU」与「状态」的行; 找不到再退回旧结构 row2。
+            """
             try:
-                return pd.read_excel(xl, sheet_name=sn, header=2, dtype=str)
+                head = pd.read_excel(xl, sheet_name=sn, header=None,
+                                     nrows=8, dtype=str)
             except Exception:
                 return None     # 旧版日报可能缺某张表 → 跳过该节, 不抛异常
+            hrow = None
+            for i in range(len(head)):
+                cells = [_s(v) for v in head.iloc[i].tolist()]
+                if any(c.endswith("SKU") for c in cells) and "状态" in cells:
+                    hrow = i
+                    break
+            if hrow is None:        # 没有「状态」列的表(如豁免备查)只认 SKU
+                for i in range(len(head)):
+                    cells = [_s(v) for v in head.iloc[i].tolist()]
+                    if any(c.endswith("SKU") for c in cells):
+                        hrow = i
+                        break
+            try:
+                return pd.read_excel(xl, sheet_name=sn,
+                                     header=2 if hrow is None else hrow, dtype=str)
+            except Exception:
+                return None
 
         def _rows(df):
             """有效数据行: 丢全空行与「（无预警段）」一类占位行。"""
@@ -929,12 +1083,15 @@ def register(registry, cfg: dict) -> int:
         out.append("")
         if rows:
             out.append(f"— 豁免备查 ({len(rows)} 个SKU已移出追踪) —")
+            # 脱敏声明紧跟节标题, 不放在节尾: 输出超 INFLIGHT_CLIP 时是从**尾部**
+            # 截断的, 声明放末尾会在内容变多时被切掉(2026-11-05: 25 个在研 SKU
+            # 把正文顶到 4216 字, 声明正好出局, 而它是「不返回原因原文」的契约说明)。
+            out.append("  (不返回「原因」原文: 该列含登记人姓名, 平台API同样不返回)")
             for r in rows[:15]:
                 out.append(f"  {_s(r.get('SKU'))} {_free(r.get('型号'))} · "
                            f"{_s(r.get('豁免类型'))}")
             if len(rows) > 15:
                 out.append(f"  …另有 {len(rows) - 15} 个")
-            out.append("  (不返回「原因」原文: 该列含登记人姓名, 平台API同样不返回)")
         else:
             out.append("— 豁免备查 (无) —")
 
@@ -984,9 +1141,14 @@ def register(registry, cfg: dict) -> int:
                 skipped.append(k)
                 continue
             kv = {}
+            # 汇总串形如「超期❗2 / 超期8 / 进行中15」。2026-11-04 起平台新增
+            # 「超期❗」(= 任一超期段≥30天) 这个加强标记 —— 它仍然是超期,
+            # 按前缀累加, 否则 trend 的「超期」列会整列变 None(实测 10-30 起全空)。
+            parts = [(nm, int(cnt)) for nm, cnt in
+                     re.findall(r"([^\s/\d]+?)(\d+)", m.group(2))]
             for label in ("超期", "进行中", "预警"):
-                mm = re.search(rf"{label}\s*(\d+)", m.group(2))
-                kv[label] = int(mm.group(1)) if mm else None
+                hits = [cnt for nm, cnt in parts if nm.startswith(label)]
+                kv[label] = sum(hits) if hits else None
             rows.append((k, int(m.group(1)), kv))
 
         if not rows:
