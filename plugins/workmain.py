@@ -305,21 +305,60 @@ def _stage_label(part: str) -> str:
 
 
 def _stage_of(info: dict, targets: dict, modes: dict, sku: str, today) -> str:
-    """已签样 SKU 的「最新状态」: 当前环节 + 已持续N天 + 时效M天; 无在途段则「已闭环」。"""
+    """已签样 SKU 的「最新状态」: 当前环节 + 已持续N天 + 时效M天; 无在途段则「已闭环」。
+
+    2026-11-05 两处修正(业务确认: Part3 本地仓到货检查同样有时效、同样要催):
+    1. 「已持续N天」改用**当前环节自身**的最后更新时间。旧版用全局 last_up,
+       多环节并行时会拿别的环节的更新冒充当前环节停留(实测 G602 现Part5(发货)
+       显示"已持续9天", 其实 9 天前更新的是它的 Part9 单, Part5 本身已停 10 天)。
+    2. 尾部追加「另挂」段: 同一 SKU 常多环节同时在途(本地仓轨+渠道仓轨并行,
+       实测 G599-601 同时挂 Part3+5+8), 只显示 max(pending) 会把早超时的
+       Part3(本地仓到货检查) 掩盖 —— 见 _pending_flags。
+    """
     import pandas as pd
     pend = info.get("pending") or set()
     if not pend:
         return "已闭环"
-    part = "Part" + max(pend)
+    pno = max(pend)
+    part = "Part" + pno
     part_label = _stage_label(part)
     tgt = targets.get(part, 1)
     if part == "Part8" and modes.get(sku) == "sea":
         tgt = 35
-    last = info.get("last_up")
-    if last is None or pd.isna(last):
-        return f"现{part_label} 时效{tgt}天"
-    days = int((today - last.normalize()).days)
-    return f"现{part_label} 已持续{days}天/时效{tgt}天"
+    up = (info.get("part_up") or {}).get(pno, info.get("last_up"))
+    extra = _pending_flags(info, targets, modes, sku, today, exclude=pno)
+    if up is None or pd.isna(up):
+        return f"现{part_label} 时效{tgt}天" + (f"；{extra}" if extra else "")
+    days = int((today - up.normalize()).days)
+    return f"现{part_label} 已持续{days}天/时效{tgt}天" + (f"；{extra}" if extra else "")
+
+
+def _pending_flags(info: dict, targets: dict, modes: dict, sku: str,
+                   today, exclude: str) -> str:
+    """除 exclude(当前最大环节)外, 仍审批中且已超该环节确认目标的段 → 「另挂」串。
+
+    背景(2026-11-05 用户纠正): Part3 本地仓到货检查**也有时效(目标8天)**、也要催;
+    它和 Part8 渠道仓到货是两个不同仓库的到货检查, 不是同一件事。而「当前环节」
+    只取 max(pending) —— 双轨并行的 SKU(G599-601 挂 Part3+5+8)只报 Part8,
+    卡了 17~21 天的 Part3 就从简报里消失了。这里把超目标的其余在途段逐个标出,
+    口径与段级停滞一致(确认目标 < 停留 ≤ 120 天封顶)。
+    """
+    import pandas as pd
+    flags = []
+    for pno in sorted(info.get("pending") or set()):
+        if pno == exclude:
+            continue
+        part = f"Part{pno}"
+        up = (info.get("part_up") or {}).get(pno)
+        if up is None or pd.isna(up):
+            continue
+        idle = int((today - up.normalize()).days)
+        tgt = targets.get(part, 1)
+        if part == "Part8" and modes.get(sku) == "sea":
+            tgt = 35
+        if tgt < idle <= STALE_CAP_DAYS:
+            flags.append(f"⚠️另挂{_stage_label(part)}已停{idle}天/时效{tgt}天")
+    return "；".join(flags)
 
 
 def register(registry, cfg: dict) -> int:
@@ -665,7 +704,8 @@ def register(registry, cfg: dict) -> int:
                     continue
                 info = skus.setdefault(sku, {"model": "", "start": None,
                                              "pending": set(), "created": None,
-                                             "last_up": None, "sign": None})
+                                             "last_up": None, "sign": None,
+                                             "part_up": {}})
                 mv = str(r.get(model_col, "")).strip() if model_col else ""
                 if mv and mv.lower() != "nan" and not info["model"]:
                     info["model"] = mv
@@ -680,6 +720,12 @@ def register(registry, cfg: dict) -> int:
                 u = updated.iloc[i] if updated is not None else None
                 if u is not None and pd.notna(u) and (info["last_up"] is None or u > info["last_up"]):
                     info["last_up"] = u
+                # 分环节记录最后更新(2026-11-05): 「另挂」段要按该环节自己的
+                # 更新时间算停留, 全局 last_up 在多环节并行时会张冠李戴
+                if u is not None and pd.notna(u):
+                    pu = info["part_up"].get(part_no)
+                    if pu is None or u > pu:
+                        info["part_up"][part_no] = u
                 if signs is not None:
                     sg = signs.iloc[i]
                     # 签样取最早一次(重复列/多轮确认时以首次签样为准)
@@ -762,7 +808,13 @@ def register(registry, cfg: dict) -> int:
                "流程依赖(2026-11-05 业务确认): Part3 本地仓到货检查不通过 → Part6 单据"
                "建不出来, 卡 Part3 会直接拖死素材段; 素材通用的 SKU(条目末尾带"
                "[素材通用])可跳过 Part6 的寄送→拍摄→素材加工三段(共"
-               f"{GENERIC_MATERIAL_SAVE_DAYS}天), 由本地仓到货直接进上架 Listing + 广告。"]
+               f"{GENERIC_MATERIAL_SAVE_DAYS}天), 由本地仓到货直接进上架 Listing + 广告。",
+               # 2026-11-05 用户纠正: Part3 也有时效、也要催; 两个「到货检查」是
+               # 两个仓库, 别混为一谈, 也别只催 max(pending) 那个环节。
+               "两个到货检查的区别: Part3=本地仓到货检查(供拍摄素材轨, 拖 Part6), "
+               "Part8=渠道仓到货检查(供销售轨), 都有确认目标(见停滞段), 谁超目标都要催。"
+               "同一 SKU 常两轨并行在途, 签样追踪/临期/超期条目尾部的「⚠️另挂PartX"
+               "(环节名)已停N天/时效M天」就是超目标的其他在途段, 写行动建议时一并覆盖。"]
         stale_warn = _stale_note(fresh_time)
         if stale_warn:
             out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
@@ -794,13 +846,28 @@ def register(registry, cfg: dict) -> int:
         for left, sku, mv, stuck, s, tag in warn_list[:n]:
             out.append(f"  {sku} {mv} 剩{left}天[{tag}] "
                        f"(启动{s:%m-%d}, 卡{_stage_label(stuck)})"
-                       + _material_tag(gmat, sku, stuck) + _ship_tag(ship, sku))
+                       + _material_tag(gmat, sku, stuck) + _ship_tag(ship, sku)
+                       + _pending_flags(skus[sku], targets, modes, sku, today,
+                                        exclude=stuck[4:]))
         out.append(f"\n== 已超期(超全流程线, {len(over_list)}个; 另历史遗留{legacy}个不列) ==")
         for over, sku, mv, stuck, s, tag in over_list[:n]:
             out.append(f"  {sku} {mv} 已超{over}天[{tag}] "
                        f"(启动{s:%m-%d}, 卡{_stage_label(stuck)})"
-                       + _material_tag(gmat, sku, stuck) + _ship_tag(ship, sku))
+                       + _material_tag(gmat, sku, stuck) + _ship_tag(ship, sku)
+                       + _pending_flags(skus[sku], targets, modes, sku, today,
+                                        exclude=stuck[4:]))
+        # 按环节汇总(同SKU同环节去重): 段级TOP按超目标天数排序, 前8常年被
+        # Part8 的 120 天老单占满, Part3(本地仓到货) 超目标几单从 TOP 里根本
+        # 看不见 —— 2026-11-05 用户指出 Part3 也要催, 先给环节级全貌。
+        seg_pairs = {(r[2], r[3]) for r in seg_rows}
+        agg = {}
+        for _sku, _part in seg_pairs:
+            agg[_part] = agg.get(_part, 0) + 1
+        agg_line = " · ".join(f"{p} {c}" for p, c in
+                              sorted(agg.items(), key=lambda kv: -kv[1]))
         out.append(f"\n== 环节停滞超目标(段级口径: 距最后更新vs环节目标, {len(seg_rows)}单, 行级可重复) TOP ==")
+        if agg_line:
+            out.append(f"  [按环节去重] {agg_line} (超目标在途单数, 同SKU多环节分别计)")
         for over_t, idle, sku, part, tgt in seg_rows[:n]:
             out.append(f"  {sku} {part} 停滞{idle}天/目标{tgt}天 (超{over_t}天)")
         part9_new.sort(key=lambda x: x[0])          # 最老的新单排前, 先到先办
