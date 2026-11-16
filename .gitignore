@@ -20,6 +20,9 @@ watch/watch.db*
 watch/_probe*.db*
 # P1 探针运行报告（含实例 ID 与时间，本地证据不入库）
 scripts/_p1_probe*.json
+# fast 回归临时抓取文件（正式归档在 docs/test_reports/）
+scripts/_fast_output*.txt
+scripts/_rehearsal_dir.txt
 
 # 含密钥的本地备份（config.json 本身已排除，备份同样不能进仓库）
 config.json.bak*
