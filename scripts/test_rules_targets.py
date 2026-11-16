@@ -112,6 +112,32 @@ def test_workmain_uses_snapshot():
     check("输出带目标来源行", "环节目标来源" in src)
 
 
+def test_rules_public_api():
+    """真导入 + 真调用: 静态字符串检查抓不到「__init__ 漏导出」这类接入 bug。
+
+    2026-11-16 实踩: __init__.py 没导出 describe_sources, workmain 的
+    `from rules import resolve_targets, describe_sources` 抛 ImportError 被 except
+    吞掉 → 静默回退内置常量, Part1 从快照的 13 变回 75, 单测却全绿(只测直调)。
+    """
+    print("\n== rules 公开 API 可导入 ==")
+    try:
+        from rules import resolve_targets, describe_sources  # noqa: F401
+        check("rules 包导出 resolve_targets + describe_sources", True)
+    except ImportError as e:
+        check("rules 包导出 resolve_targets + describe_sources", False, str(e))
+        return
+    try:
+        import agentcore as core
+        reg = core.build_registry()
+        core.load_plugins(reg, core.load_config())
+        out = str(reg.execute("pipeline_alerts", {"line": "手机膜", "top": 3}))
+        check("workmain 输出不含解析失败痕迹", "解析失败" not in out)
+        src_line = next((l for l in out.splitlines() if "环节目标来源" in l), "")
+        check("workmain 输出标注快照来源", "规则快照" in src_line, src_line[:160])
+    except Exception as e:  # noqa: BLE001
+        check("workmain 真跑拿到快照来源", False, repr(e))
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     test_part1_tightened()
@@ -121,6 +147,7 @@ def main():
     test_shell_untouched()
     test_no_person_names()
     test_workmain_uses_snapshot()
+    test_rules_public_api()
     n_ok = sum(1 for _, ok in RESULTS if ok)
     print(f"\n{'=' * 46}\n[环节目标单一真源单测] {n_ok}/{len(RESULTS)} 通过")
     return 0 if n_ok == len(RESULTS) else 1

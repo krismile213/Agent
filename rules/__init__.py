@@ -18,6 +18,7 @@ from .targets import (  # noqa: F401
     load_snapshot,
     part_targets_from_segments,
     resolve_targets,
+    describe_sources,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "load_snapshot",
     "part_targets_from_segments",
     "resolve_targets",
+    "describe_sources",
 ]

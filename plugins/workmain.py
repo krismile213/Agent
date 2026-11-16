@@ -17,6 +17,7 @@ workmain 插件 — work-main 工作区的领域工具包(可选)
 
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime
@@ -136,6 +137,55 @@ def _is_sign_col(name: str) -> bool:
     壳=Part1/2「三方确样时间」「手机壳确样日期/时间」等(与数据后台 NODES['签样'] 同源)."""
     n = str(name)
     return ("签样" in n) or ("确样" in n) or ("样品" in n and "完成" in n)
+
+
+def _freshness_files(files) -> datetime | None:
+    """快照产出时刻 = Part*.xlsx 的最大 mtime。
+
+    xlsx 每次同步都会被重写, 所以 mtime 测的是「同步跑没跑」—— 这才是催办
+    该参照的新鲜度锚。不要用表内「更新时间」列(会被批量转交刷, 见 rules/freshness.py)。
+    """
+    best = None
+    for f in files:
+        try:
+            m = datetime.fromtimestamp(f.stat().st_mtime)
+            if best is None or m > best:
+                best = m
+        except OSError:
+            continue
+    return best
+
+
+def _freshness_archive(root: Path) -> datetime | None:
+    """归档库最新同步完成时刻 = export_runs.MAX(finished_at)。
+
+    用它和快照 mtime 比: 库里已拉到新数据但 xlsx 没导出 = 快照被超越 = 禁止催办。
+    ⚠️ 不能用 export_rows.updated_at —— 那是每轮同步全表刷的同步时刻, 不是业务变更。
+    库不存在/查询失败一律返回 None(降级为「只看快照年龄」, 不误伤)。
+    """
+    db = root / "dingtalk" / "export_archive.db"
+    if not db.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("SELECT MAX(finished_at) FROM export_runs").fetchone()
+        finally:
+            con.close()
+        v = row[0] if row else None
+        if v:
+            return datetime.fromisoformat(str(v))
+    except Exception:
+        pass
+    return None
+
+
+def _freshness_guard(files, root: Path):
+    """采集 IO → 调 rules.freshness 纯函数 → 返回 FreshnessVerdict。"""
+    from rules.freshness import assess_freshness
+    snap = _freshness_files(files)
+    arch = _freshness_archive(root)
+    return assess_freshness(snap, arch)
 
 
 def _stale_note(fresh_time, warn_days: int = 2) -> str:
@@ -883,10 +933,17 @@ def register(registry, cfg: dict) -> int:
                "Part8=渠道仓到货检查(供销售轨), 都有确认目标(见停滞段), 谁超目标都要催。"
                "同一 SKU 常两轨并行在途, 签样追踪/临期/超期条目尾部的「⚠️另挂PartX"
                "(环节名)已停N天/时效M天」就是超目标的其他在途段, 写行动建议时一并覆盖。"]
+        # 数据新鲜度硬判(2026-11-16): 催办基于旧快照 = 催已完成的事。横幅置顶,
+        # blocked 时 daily_brief 的收尾会把 ⑥ 行动建议整段替换为禁催提示。
+        guard = _freshness_guard(files, root)
+        if guard.banner:
+            out.append(guard.banner)
         stale_warn = _stale_note(fresh_time)
         if stale_warn:
             out.append(stale_warn)  # 数据过旧时先于一切预警, 防断供虚增天数被误读
-        out.append(f"数据截至(最新更新时间): {str(fresh_time)[:16] if fresh_time is not None else '无'}")
+        up_to = str(fresh_time)[:16] if fresh_time is not None else "无"
+        snap_to = f"{guard.snapshot_at:%m-%d %H:%M}" if guard.snapshot_at else "无"
+        out.append(f"数据截至(最新更新时间): {up_to} | 快照产出: {snap_to}")
         out.append(f"\n== 最近{NEW_SKU_WINDOW_DAYS}天新增SKU({since:%m-%d}~{today:%m-%d}, "
                    f"{len(new_skus)}个; 含签样追踪) ==")
         wait_sign = []          # (未签样龄, sku) 供汇总

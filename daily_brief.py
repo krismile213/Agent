@@ -700,6 +700,36 @@ def fix_sku_counts(md: str) -> tuple:
     return md[:idx] + "\n".join(out_lines) + md[idx + len(sec):], fixed
 
 
+# 数据新鲜度禁催(2026-11-16): pipeline_alerts 首行若带 ⛔ 横幅(快照过期/后台已拉到
+# 新数据), 基于旧快照的催办 = 催已完成的事。确定性收尾把 ⑥ 整段替换为提示, 不靠模型
+# 自觉 —— 与 ③④⑤ 渲染同一纪律: 能由代码保证的, 不给模型留违例空间。
+# 三种 blocked 横幅分别以「数据源不可用 / 快照已被超越 / 数据已N小时未刷新」开头,
+# 统一以 ⛔ 前缀识别(stale 用 ⚠️, 不会误伤)。
+_FRESHNESS_BLOCK = "⛔"
+
+
+def enforce_freshness_guard(md: str, tool_out: str) -> tuple:
+    """工具输出含 ⛔ 新鲜度横幅时, 把 ⑥ 行动建议替换为禁催提示。
+
+    返回 (新正文, 是否替换)。只在 blocked 时动手; stale(⚠️) 只提示不替换 ——
+    数据旧但没新批次时仍要催, 只是让人先核对。
+    """
+    if not any(ln.startswith(_FRESHNESS_BLOCK) for ln in (tool_out or "").splitlines()):
+        return md, False
+    m = re.search(rf"^#{{2,4}}\s*⑥.*$", md or "", re.M)
+    if not m:
+        return md, False
+    tail = md[m.end():]
+    m2 = re.search(r"^#{2,4}\s*[①②③④⑤]", tail, re.M)
+    end = m.end() + (m2.start() if m2 else len(tail))
+    banner = next(ln.strip() for ln in tool_out.splitlines()
+                  if ln.startswith(_FRESHNESS_BLOCK))
+    # 保留原横幅全文供追溯(它已写明原因: 快照超越/过旧/不可用)。
+    notice = ("• 数据源不新鲜, 本轮暂不催办 —— " + banner
+              + "。请等下一轮同步刷新后再决定行动。")
+    return md[:m.end()] + "\n\n" + notice + "\n\n" + md[end:], True
+
+
 def drop_ghost_skus(md: str, tool_out: str) -> tuple:
     """删掉 ⑥ 里引用了「工具输出中不存在的 SKU」的条目 —— 编造残留的兜底。
 
@@ -1148,6 +1178,13 @@ def main():
                 print(f"[{tag}] ⑥ 数量校正 {n_fix} 条")
         except Exception as e:                      # noqa: BLE001
             print(f"[{tag}] ⑥ 数量校正跳过: {e}")
+        # 数据新鲜度禁催: 放最后, 覆盖前面所有重写; blocked 时 ⑥ 整段换提示。
+        try:
+            md, gated = enforce_freshness_guard(md, tool_out)
+            if gated:
+                print(f"[{tag}] ⑥ 数据新鲜度禁催: 已替换为暂缓提示")
+        except Exception as e:                      # noqa: BLE001
+            print(f"[{tag}] 新鲜度禁催跳过: {e}")
         return md
 
     transcript = core.Transcript(f"brief_{now.strftime('%Y%m%d')}{suffix}")
