@@ -85,14 +85,46 @@ def test_delta_column():
 
 
 def test_weekend_gap_is_missing_not_zero():
-    """10-25 是周日(无日报): 必须整行缺, 不能补一行 0。"""
+    """缺日报的日期必须整行缺, 不能补一行 0。
+
+    2026-11-16 两次修正:
+      ① 原来写死「10-25 缺 / 10-24、10-26 在」, 而工具读的是「最近 N 份」,
+         日报一推进窗口就滑走 → 断言必然假失败(窗口已到 10-31~11-16)。
+      ② 改成「周日必缺」也是错的 —— 实测 11-01(周日)有日报, 11-08/11-14/11-15 没有,
+         平台并不按星期出报。真正的契约是: **表里的每一行都对应磁盘上一份真实日报**,
+         没日报的日期不出现(而不是出现一行 0)。
+    """
+    import datetime as dt
+
     print("\n== 缺日不是 0 ==")
+    cfg = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+    root = Path(cfg.get("workmain_root") or r"C:\Users\dell\Desktop\work-main")
+    reports = root / "data" / "手机膜" / "手机膜" / "reports"
+    have = set()
+    for p in reports.glob("事中日报_*.xlsx"):
+        m = re.search(r"(\d{8})", p.stem)
+        if m:
+            d = m.group(1)
+            have.add(f"{d[4:6]}-{d[6:]}")
+    check("能找到日报文件(测试前提)", bool(have), str(reports))
+
     reg = _reg()
     out = reg.execute("pipeline_trend", {"days": 14})
     rows = _rows(out)
     dates = {r[:5] for r in rows}
-    check("10-25(周日) 不在表里", "10-25" not in dates, str(sorted(dates)))
-    check("相邻日期都在(10-24/10-26)", "10-24" in dates and "10-26" in dates, str(sorted(dates)))
+    check("有数据行", bool(dates), str(out[:120]))
+    if not dates or not have:
+        return
+
+    ghost = sorted(d for d in dates if d not in have)
+    check("表里每一行都有对应日报(没有凭空补的行)", not ghost, str(ghost))
+    lo, hi = min(dates), max(dates)
+    lost = [d for d in sorted(have) if lo <= d <= hi and d not in dates]
+    check("有日报的日期都在表里(没被静默丢行)", not lost, str(lost[:8]))
+
+    # 显式反例: 缺日报的日期不许出现; 且缺日两侧不能出现「全 0」行
+    zero_rows = [r for r in rows if re.search(r"\s0\s+0\s+0\b", r)]
+    check("没有 0/0/0 的填充行", not zero_rows, str(zero_rows[:3]))
 
 
 def test_days_clamp():

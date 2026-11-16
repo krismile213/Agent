@@ -44,7 +44,16 @@ NEW_SKU_WINDOW_DAYS = 40
 # 「豁免备查」整节切掉 —— 而豁免节里写着「不返回「原因」原文」这条脱敏声明,
 # 切掉等于脱敏说明消失. 教训: 上限要留余量, 且测试断言应引用本常量而非写死数字
 # (写死的话下次改上限又挂, 而且分不清是"内容变多"还是"截断出问题")。
-INFLIGHT_CLIP = 4200
+# 2026-11-16 由 4200 再抬到 5200: 平台把「无目标段」子表并进风险预警后多出 19 行
+# (修好列错位才能读), 正文回到 4.4k, 4200 又把「豁免备查」节连同脱敏声明切掉。
+# 同一类事故第三次了 —— 结论是上限必须留 20% 余量, 且新加节必须回头看尾部还在不在。
+INFLIGHT_CLIP = 5200
+
+# pipeline_alerts 输出上限(字符). 2026-11-16 由硬编码 3800 提为常量并抬到 5600:
+# 超期名单每条带「到货渠道仓+货件号」后正文已到 4.4k+, 3800 把尾部
+# 「环节停滞TOP + 按环节汇总」和「Part9新单待办」整段静默切掉 ——
+# 而 ⑥ 行动建议正是靠停滞段判断"该催哪个环节", 切掉等于让模型凭空猜。
+PIPELINE_CLIP = 5600
 
 # 签样节点口径(单一真源, 与数据后台 seg_rules 对齐): 未签样且超过目标天数即标 ⚠️。
 #   手机膜: 取数(Part1 手机数据取得日期) → 签样, 目标 12 天(膜 SEGS「取数→签样」)。
@@ -594,28 +603,31 @@ def register(registry, cfg: dict) -> int:
     # 权威表与运输模式缓存(进程内)
     _caches: dict = {}
 
-    def _part_targets() -> dict:
-        """从 流程复盘/时效确认规则表.xlsx 动态读 Part→确认目标(天); 表缺失用同值兜底."""
-        if "targets" in _caches:
-            return _caches["targets"]
-        fallback = {"Part1": 75, "Part2": 1, "Part3": 8, "Part4": 7,
-                    "Part5": 22, "Part6": 13, "Part7": 7, "Part8": 15, "Part9": 1}
+    def _part_targets(line: str = "手机膜") -> dict:
+        """Part→确认目标(天)。三级来源: 规则快照(后端真源) > 时效确认规则表.xlsx > 内置常量。
+
+        2026-11-16 口径裁决: Part1 由 75 收紧为 **13**(提案→取数 1 + 取数→签样 12)。
+        原先只读 xlsx，而 xlsx 是 2026-10-19 之前的旧口径 —— 探针实测两边差 5.8 倍，
+        且当天在途单全在 >120 天遗产区，群里数字看不出异常(潜伏缺陷)。
+        规则与来源说明见 `rules/targets.py`（单一真源，可脱离 xlsx/:8000 运行）。
+        """
+        key = f"targets:{line}"
+        if key in _caches:
+            return _caches[key]
         try:
-            import pandas as pd
-            df = pd.read_excel(full("流程复盘/时效确认规则表.xlsx"), dtype=str)
-            got = {}
-            for _, r in df.iterrows():
-                p = str(r.get("Part", "")).strip()
-                if p.startswith("Part"):
-                    try:
-                        got[p.split()[0]] = int(float(r.get("确认目标(天)")))
-                    except (TypeError, ValueError):
-                        pass
-            fallback.update({k: v for k, v in got.items() if k in fallback})
-        except Exception:
-            pass
-        _caches["targets"] = fallback
-        return fallback
+            from rules import resolve_targets, describe_sources
+            targets, sources = resolve_targets(
+                snapshot_path=full("资产文件/规则快照.json"),
+                rule_xlsx=full("流程复盘/时效确认规则表.xlsx"),
+                line=line)
+            _caches[f"target_src:{line}"] = describe_sources(sources)
+        except Exception as e:  # 解析链本身出错: 用内置常量(与真源同值), 并留下痕迹
+            from rules.targets import PART_TARGET_FALLBACK
+            targets = dict(PART_TARGET_FALLBACK)
+            targets.update({"Part8": 15, "Part9": 1})
+            _caches[f"target_src:{line}"] = f"内置常量(解析失败: {type(e).__name__})"
+        _caches[key] = targets
+        return targets
 
     def _sku_modes() -> dict:
         """SKU→air/sea: 取路线总览(海运货件数>0或口径=sea → sea), 未覆盖默认air."""
@@ -661,7 +673,7 @@ def register(registry, cfg: dict) -> int:
                     "③ 近期情况可读 inflight_report(昨日事中日报), 引用时注明日期。")
         today = pd.Timestamp(datetime.now().strftime("%Y-%m-%d"))
         since = today - pd.Timedelta(days=NEW_SKU_WINDOW_DAYS)
-        targets = _part_targets()
+        targets = _part_targets(line)
         modes = _sku_modes()
         ship = _part8_shipments(files)   # sku -> [(到货渠道仓, 货件号)] 供临期/超期标注
         gmat = _generic_material_map(files)  # sku -> (素材是否通用, 依据) 供判路径长短
@@ -786,6 +798,10 @@ def register(registry, cfg: dict) -> int:
                f"段级停滞天数=今天-最后更新时间(归零), 对照该环节确认目标(近似, 按单据行可重复; "
                f"注意与scan_sync_data的停滞口径差异: 归零差~1天(封顶线已统一为{STALE_CAP_DAYS}天); "
               f"Part9新单=创建≤7天且审批中, 悬挂旧单不提醒)",
+               # 目标天数的来源如实标注(2026-11-16): Part1 已于本日由 75 收紧为 13。
+               # 模型若被问「为什么是13」, 输出里有据可依, 不必自己编口径出处。
+               f"环节目标来源: {_caches.get(f'target_src:{line}', '内置常量')}; "
+               f"Part1=13(提案→取数1+取数→签样12, 2026-11-16 收紧, 旧值75已废)",
                # 两个工具对「超期」给的是两套数(2026-10-29 实测: 本工具 24 / 事中日报 6),
                # 都正确但统计对象不同。不写明, 用户看到两个数字会以为其中一个错了。
                "口径对照: 本工具「已超期」= 全流程线超期(所有在途单, 空运60/海运69天); "
@@ -874,7 +890,7 @@ def register(registry, cfg: dict) -> int:
         out.append(f"\n== Part9新单待办(创建≤7天且审批中, {len(part9_new)}单; 悬挂旧单不在此列) ==")
         for c9, sku9, mv9, owner9 in part9_new[:10]:
             out.append(f"  {sku9} {mv9} (创建 {c9:%m-%d %H:%M}, 当前负责人: {owner9 or '—'})")
-        return clip("\n".join(out), 3800)
+        return clip("\n".join(out), PIPELINE_CLIP)
 
     # ---------- 执行工具(write级, 需确认) ----------
 
@@ -970,37 +986,69 @@ def register(registry, cfg: dict) -> int:
         except Exception as e:
             return f"[错误] 打不开 {f.name}: {e} (文件可能正被 Excel/WPS 占用)"
 
-        def _sheet(sn):
-            """按「SKU 表头所在行」自适应读取 —— 不能写死 header=2。
+        def _blocks(sn):
+            """把一个 sheet 按「表头行(首列=SKU)」切成多张子表 → [DataFrame, ...]。
 
-            平台 2026-10-29 在 row1 插了一行图例(状态「超期❗」等的解释),
-            表头就从 row2 下移到 row3。写死 header=2 时 11-04 起的日报整表读错
-            (列名变成第一条数据, 于是「在研状态总表」解析不出汇总行,
-            pipeline_trend 的「这周 vs 上周」整段变空 —— 2026-11-05 实测)。
-            扫前 8 行找同时含「SKU」与「状态」的行; 找不到再退回旧结构 row2。
+            平台 2026-11-16 起把「风险预警」改成**上下两张子表**共用一张 sheet：
+              第 1 张: 即将超期预警 (SKU/部门/环节/已进行(天)/目标(天)/预警线(天)/责任人)
+              第 2 张: ⚠ 无目标段 (SKU/当前停留环节/已停留(天)/责任人)
+            只按第 1 张的表头读到表尾时, 第 2 张的列会整列错位塞进第 1 张的列名里 ——
+            实测「责任人」姓名落进了「已进行(天)」列, 直接泄进模型上下文(脱敏红线),
+            同时把 20 行噪声灌进输出撞到 clip 上限, 把尾部「豁免备查」整节切掉。
+            所以必须按表头行切块, 主表只取第一块。
             """
             try:
-                head = pd.read_excel(xl, sheet_name=sn, header=None,
-                                     nrows=8, dtype=str)
+                # 表头行自适应: 不能写死 header=2 —— 平台 2026-10-29 在 row1 插了
+                # 一行图例(状态「超期❗」的解释), 表头从 row2 下移到 row3; 写死时
+                # 11-04 起整表读错(列名变成第一条数据), pipeline_trend 整段变空。
+                raw = pd.read_excel(xl, sheet_name=sn, header=None, dtype=str)
             except Exception:
-                return None     # 旧版日报可能缺某张表 → 跳过该节, 不抛异常
-            hrow = None
-            for i in range(len(head)):
-                cells = [_s(v) for v in head.iloc[i].tolist()]
-                if any(c.endswith("SKU") for c in cells) and "状态" in cells:
-                    hrow = i
-                    break
-            if hrow is None:        # 没有「状态」列的表(如豁免备查)只认 SKU
-                for i in range(len(head)):
-                    cells = [_s(v) for v in head.iloc[i].tolist()]
-                    if any(c.endswith("SKU") for c in cells):
-                        hrow = i
-                        break
-            try:
-                return pd.read_excel(xl, sheet_name=sn,
-                                     header=2 if hrow is None else hrow, dtype=str)
-            except Exception:
-                return None
+                return []       # 旧版日报可能缺某张表 → 跳过该节, 不抛异常
+            if raw.empty:
+                return []
+
+            def cells(i):
+                return [_s(v) for v in raw.iloc[i].tolist()]
+
+            def is_head(cs):
+                # 表头行判定: 含有以 SKU 结尾的单元格 + ≥3 个非空格 + 没有纯数字单元格。
+                # 不能只认「首列=SKU」—— 异常上报清单 的首列是「类型」, 首列一卡就把
+                # 整节读空(2026-11-16 实测: 「异常上报」节静默消失)。
+                # 数据行必带纯数字(停留天数/货件号/序号), 表头不会, 用这一点排除误判。
+                filled = [c for c in cs if c]
+                if len(filled) < 3:
+                    return False
+                if not any(c.endswith("SKU") for c in filled):
+                    return False
+                return not any(c.isdigit() for c in filled)
+
+            heads = [i for i in range(len(raw)) if is_head(cells(i))]
+            if not heads:
+                return []
+            out = []
+            for k, h in enumerate(heads):
+                stop = heads[k + 1] if k + 1 < len(heads) else len(raw)
+                cols, seen = [], {}
+                for j, c in enumerate(cells(h)):
+                    name = c if c else f"col{j}"
+                    if name in seen:            # 重名列必须去重, 否则 df.get 返回 Series
+                        seen[name] += 1
+                        name = f"{name}.{seen[name]}"
+                    else:
+                        seen[name] = 0
+                    cols.append(name)
+                df = raw.iloc[h + 1:stop].copy()
+                df.columns = cols
+                # 块边界前的说明行/空行(只 1 个单元格有值)属于下一块, 丢掉
+                while len(df) and sum(1 for v in [_s(x) for x in df.iloc[-1].tolist()] if v) <= 1:
+                    df = df.iloc[:-1]
+                out.append(df.reset_index(drop=True))
+            return out
+
+        def _sheet(sn, block: int = 0):
+            """取第 block 张子表(0=主表); sheet 不存在或块数不足 → None。"""
+            bs = _blocks(sn)
+            return bs[block] if len(bs) > block else None
 
         def _rows(df):
             """有效数据行: 丢全空行与「（无预警段）」一类占位行。"""
@@ -1094,6 +1142,14 @@ def register(registry, cfg: dict) -> int:
             if len(rows) > 30:
                 out.append(f"  …另有 {len(rows) - 30} 个SKU未列出"
                            "(全量去平台「事中日报」页)")
+            # 人工登记备注不能被截断吞掉（2026-11-16）: 它是"要不要催"的业务决策,
+            # 排在 TOP30 之外的 SKU 一旦带着「暂时不弄了」被省略, 模型就会催错人。
+            hidden = [( _s(r.get("SKU")), _free(r.get("人工登记")))
+                      for r in rows[30:]
+                      if _s(r.get("人工登记")) and _s(r.get("人工登记")) != "—"]
+            if hidden:
+                out.append("  (未列出但带人工登记备注: "
+                           + "; ".join(f"{s} 人工登记:{n}" for s, n in hidden) + ")")
 
         # ② 超期明细
         rows = _rows(_sheet("超期明细"))
@@ -1124,6 +1180,22 @@ def register(registry, cfg: dict) -> int:
                 out.append(f"  …另有 {len(rows) - 15} 段")
         else:
             out.append("— 风险预警 (本次无预警段) —")
+
+        # ③b 无目标段（平台 2026-11-16 起把这张子表垂直堆在「风险预警」下面）
+        #     未设目标天 → 不参与超期/预警判定，但「已停留 37 天没人管」本身就是信号。
+        #     只列 SKU/环节/停留天数：该子表带「责任人」真名，2026-11-16 实测曾因
+        #     列错位把姓名塞进数字列，故这里显式不读该字段。
+        rows2 = _rows(_sheet("风险预警", 1))
+        if rows2:
+            rows2.sort(key=lambda r: -_num(r.get("已停留(天)")))
+            out.append("")
+            out.append(f"— 无目标段 ({len(rows2)} 个; 平台未设目标天, 不参与超期判定, "
+                       "需人工判断要不要催) —")
+            for r in rows2[:10]:
+                out.append(f"  {_s(r.get('SKU'))} {_s(r.get('当前停留环节'))} "
+                           f"已停留{_s(r.get('已停留(天)'))}天")
+            if len(rows2) > 10:
+                out.append(f"  …另有 {len(rows2) - 10} 个")
 
         # ④ 异常上报清单
         rows = _rows(_sheet("异常上报清单"))

@@ -135,7 +135,10 @@ def test_real():
                     for _, r in _ov.iterrows()
                     if str(r.get("人工登记") or "").strip()
                     not in ("", "nan", "None")}
-        placed = [f"人工登记:{v}" for v in note_map.values() if f"人工登记:{v}" in out]
+        # 必须拿**同一份日报**对账(2026-11-16 修): 上面读的是固定日期 20261015 的
+        # 备注, 而 out 是"最新一份", 日报推进后两天备注自然不同 → 断言假失败。
+        out_same = reg.tools["inflight_report"].func(line="手机膜", date="20261015")
+        placed = [f"人工登记:{v}" for v in note_map.values() if f"人工登记:{v}" in out_same]
         check("人工登记: 备注按SKU带入输出", len(placed) == len(note_map),
               extra=f"notes={note_map} placed={placed}")
 
