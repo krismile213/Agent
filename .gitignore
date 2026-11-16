@@ -18,6 +18,8 @@ agent.db*
 # 实时监听自己的事件库（运行时数据，可重建；源库在 work-main 下，不在此仓库）
 watch/watch.db*
 watch/_probe*.db*
+# P1 探针运行报告（含实例 ID 与时间，本地证据不入库）
+scripts/_p1_probe*.json
 
 # 含密钥的本地备份（config.json 本身已排除，备份同样不能进仓库）
 config.json.bak*
