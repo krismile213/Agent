@@ -7,6 +7,9 @@ plugins/rag.py — 通用混合检索插件 (BM25 + 向量 + RRF 融合 + LLM �
   - 双路召回: BM25(精确词/SKU编号强) + 向量(语义泛化), 各取top30
   - 融合: RRF(倒数排名融合, k=60) —— 免调权重的标准做法
   - 重排: LLM列表重排(top12→top_k), 失败自动退回RRF序
+  - 语义繁化(query enrichment): 检索前把口语/隐含意图的查询映射到文档规范语义锚点,
+    帮助小模型(bge-small)对齐; 原查询+繁化查询双路召回后RRF融合, 不丢词面精度.
+    纯本地零依赖, 可开关(rag_enrich, 默认开).
   - 嵌入: 默认本地 fastembed(BAAI/bge-small-zh-v1.5, 512维, ONNX免torch, 免费离线),
     可选远程 OpenAI兼容 /embeddings(z.ai embedding-3); 按chunk hash增量缓存, 只嵌新/变更块
   - 降级: 嵌入不可用→纯BM25+RRF并在结果中注明; 无numpy→同样降级
@@ -21,7 +24,8 @@ plugins/rag.py — 通用混合检索插件 (BM25 + 向量 + RRF 融合 + LLM �
       "local_cache_dir": "D:\\dev-cache\\fastembed",# 模型缓存(默认D盘)
       "base_url": "...", "model": "embedding-3"    # 仅 backend=remote 时用
   }
-  "rag_rerank": true                               # 关掉省token
+  "rag_rerank": true,                              # 关掉省token
+  "rag_enrich": true                               # 语义繁化开关(默认开, 本地零成本)
 """
 
 import hashlib
@@ -346,6 +350,71 @@ def _rrf(lists: list, k: int = 60) -> list:
     return sorted(agg.items(), key=lambda x: -x[1])
 
 
+# ---------------- 语义繁化 (query enrichment) ----------------
+# 小模型(bge-small)对口语/隐含意图的语义对齐弱: "从拿到手机数据到全部到货最慢
+# 允许多久" 与文档"从取得手机数据启动到渠道仓到货结束,全程≤60自然日(红线)"语义
+# 等价, 但词面和向量都不易命中。检索前把查询里的口语概念映射到文档规范语义锚点,
+# 原查询+繁化查询双路召回后 RRF 融合 —— 只注入概念锚点, 不注入答案数字(60/15),
+# 保证不造假; 原词面始终保留, 不会稀释精确查询。纯本地零依赖, rag_enrich 可关。
+_ENRICH_CONCEPTS = [
+    # (触发词正则(任一命中), 注入的规范语义锚点)
+    (("全流程", "整条链路", "整个过程", "全程", "总周期", "红线", r"从.*到.*到货"),
+     "全流程 整条链路 开发总周期 红线 自然日 上限 全流程汇总表"),
+    (("手机数据", "拿到数据", "取得数据", "取数", "立项"),
+     "取得手机数据 立项 启动"),
+    (("到货", "渠道仓", "全部到货"),
+     "渠道仓到货 全流程结束 到货确认"),
+    (("最慢", "最晚", "多久", "允许多久", "多少天", "上限", "最迟"),
+     "上限 红线 自然日"),
+    (("时效", "目标", "几天", "目标天数"),
+     "时效目标 目标天数 环节"),
+    (("口径", "系统口径", "动作口径"),
+     "口径 系统口径 动作口径 选择"),
+    (("审批编号", "编号", "文本", "精度"),
+     "审批编号 按文本处理 精度 长数字"),
+]
+_ENRICH_MAX_CHARS = 120
+
+
+def _enrich_query(query: str, cfg: dict) -> str:
+    """把口语查询扩展为规范语义锚点串(保留原词面). 关闭或无命中则原样返回."""
+    if not cfg.get("rag_enrich", True):
+        return query
+    anchors = []
+    for triggers, add in _ENRICH_CONCEPTS:
+        if any(re.search(t, query) for t in triggers):
+            anchors.append(add)
+    if not anchors:
+        return query
+    extra = " ".join(anchors)
+    if len(extra) > _ENRICH_MAX_CHARS:
+        extra = extra[:_ENRICH_MAX_CHARS]
+    return (query + " " + extra).strip()
+
+
+def _hybrid(cfg: dict, query: str, top: int = 30):
+    """BM25 走原查询(护住词面精度), 向量走语义繁化查询(对齐权威文档), RRF 融合.
+
+    实测(6 条评测): 四路等权/繁化路加权都会让原查询的高频词噪声(手机膜/代码审查
+    报告)反超权威文档; 而 BM25 保留原查询 + 向量用繁化查询, recall 与语义 top1
+    同时全中。繁化查询含原词面, 精确查询也不会丢。
+
+    返回 (fused_top, routes, enriched); routes 值标来源(bm25/vector/both).
+    """
+    bm = _bm25_rank(query, top)
+    q2 = _enrich_query(query, cfg)
+    enriched = q2 != query
+    # 向量路: 繁化查询优先(语义对齐); 繁化关闭/无命中则退回原查询
+    vc = _vec_rank(q2, cfg, top)
+    routes = {}
+    for i, _ in bm:
+        routes[i] = "bm25"
+    for i, _ in (vc or []):
+        routes[i] = "both" if i in routes else "vector"
+    lists = [x for x in (bm, vc) if x]
+    return _rrf(lists)[:12], routes, enriched
+
+
 def _rerank(query: str, cand: list, top_k: int, cfg: dict) -> list:
     """LLM列表重排: 失败/关闭时原序返回."""
     if not cfg.get("rag_rerank", True) or len(cand) <= 1:
@@ -411,20 +480,16 @@ def register(registry, cfg: dict) -> int:
                 return msg
             if _load(cfg) is None:
                 return "[错误] 索引构建后仍不可用"
-        bm = _bm25_rank(query, 30)
-        vc = _vec_rank(query, cfg, 30)
-        routes = {}
-        for i, _ in bm:
-            routes[i] = "bm25"
-        for i, _ in (vc or []):
-            routes[i] = "both" if i in routes else "vector"
-        fused = _rrf([bm] + ([vc] if vc else []))[:12]
+        fused, routes, enriched = _hybrid(cfg, query, 30)
         if not fused:
             return f"无命中(查询: {query[:60]}); 可用 kb_status 查索引覆盖范围"
         ids = _rerank(query, fused, max(1, min(int(top_k), 8)), cfg)
         reranked = cfg.get("rag_rerank", True) and len(fused) > 1
-        head = (f"混合检索({len(bm)}bm25+{len(vc or [])}vec → RRF → "
-                f"{'LLM重排' if reranked else 'RRF序'}): 查询={query[:60]}")
+        bm_n = sum(1 for v in routes.values() if v.startswith("bm25"))
+        vc_n = sum(1 for v in routes.values() if v.startswith("vector") or v == "both")
+        head = (f"混合检索({bm_n}bm25+{vc_n}vec → RRF → "
+                f"{'LLM重排' if reranked else 'RRF序'}"
+                f"{' · 语义繁化' if enriched else ''}): 查询={query[:60]}")
         return head + "\n\n" + _fmt(ids, routes, reranked)
 
     registry.register(Tool(

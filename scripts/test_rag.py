@@ -43,14 +43,8 @@ def _search(cfg, q, top_k=5, rerank=False):
     cfg2 = dict(cfg, rag_rerank=rerank)
     core.load_plugins  # noqa
     rag._load(cfg2)
-    bm = rag._bm25_rank(q, 30)
-    vc = rag._vec_rank(q, cfg2, 30)
-    routes = {}
-    for i, _ in bm:
-        routes[i] = "bm25"
-    for i, _ in (vc or []):
-        routes[i] = "both" if i in routes else "vector"
-    fused = rag._rrf([bm] + ([vc] if vc else []))[:top_k]
+    fused, routes, _enriched = rag._hybrid(cfg2, q, 30)
+    fused = fused[:top_k]
     chunks = rag._state["index"]["chunks"]
     hits = [(chunks[i]["src"], chunks[i]["text"], routes.get(i, "?"))
             for i, _ in fused]

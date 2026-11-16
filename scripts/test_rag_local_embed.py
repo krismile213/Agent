@@ -115,7 +115,22 @@ def main():
     check("同后端同模型视为兼容",
           ("local" == "local" and "BAAI/bge-small-zh-v1.5" == "BAAI/bge-small-zh-v1.5"))
 
-    # ⑦ 按模式轮询采集: 少量高价值源不应被海量源饿死在 MAX_FILES 截断线外
+    # ⑦ 语义繁化(query enrichment)
+    q = "新品从拿到手机数据到全部到货最慢允许多久"
+    e = rag._enrich_query(q, {})
+    check("繁化: 口语查询命中意图被扩展", e != q, e[:50])
+    check("繁化: 原词面完整保留(不稀释精确查询)", q in e)
+    check("繁化: 不注入答案数字(60/15/13防造假)",
+          all(n not in e for n in ("60", "15", "13")))
+    check("繁化: 注入规范语义锚点", "全流程" in e and "红线" in e)
+    check("繁化: 开关关闭时原样返回",
+          rag._enrich_query(q, {"rag_enrich": False}) == q)
+    check("繁化: 无关查询不误触发",
+          rag._enrich_query("今天天气怎么样", {}) == "今天天气怎么样")
+    check("繁化: 截断上限生效",
+          len(rag._enrich_query("全流程 红线 到货 时效 口径 文本 目标", {})) <= len(q) + rag._ENRICH_MAX_CHARS + 1)
+
+    # ⑧ 按模式轮询采集: 少量高价值源不应被海量源饿死在 MAX_FILES 截断线外
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
