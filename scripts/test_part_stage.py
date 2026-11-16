@@ -189,6 +189,17 @@ def test_pipeline_output_real():
     # 素材标记不能污染已过 Part6 的条目
     check("卡 Part8 的条目不标素材通用",
           "卡Part8(渠道仓到货检查)) [素材通用" not in out)
+    # Part8 四态总账(2026-11-16 A档): 到货判据 + 到货锚点 + 双计数。
+    # 1022单 vs 32SKU 曾被当成矛盾 —— 数字必须带 单数/SKU数 两个单位。
+    check("输出含 Part8 四态总账段",
+          "Part8(渠道仓到货检查)四态总账" in out)
+    check("输出声明 Part8 到货判据(非空才算检查)",
+          "渠道仓到货时间" in out and "运输轨" in out)
+    import re as _re
+    for state in ("未到货·运输轨", "已到货·逾期未确认", "已到货·僵尸"):
+        ln = next((l for l in out.split("\n") if state in l), "")
+        check(f"四态行「{state}」带双计数(N单/M SKU)",
+              bool(ln) and bool(_re.search(r"\d+单/\d+SKU", ln)), ln[:80])
 
 
 def test_scan_sync_data_labels():

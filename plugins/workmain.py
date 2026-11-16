@@ -657,7 +657,9 @@ def register(registry, cfg: dict) -> int:
                           top: int = 8) -> str:
         f"""四层流程信号(权威表口径): 最近{NEW_SKU_WINDOW_DAYS}天新增SKU(含签样追踪: 已签样给
         「签样日+当前环节/已持续/时效」, 未签样给龄期并超目标标⚠️) / 全流程临期 / 已超期 /
-        环节停滞超目标. 临期与超期条目附 Part8「到货渠道仓(地区)+货件号」.
+        环节停滞超目标 + Part8四态总账. 临期与超期条目附 Part8「到货渠道仓(地区)+货件号」.
+        Part8口径(2026-11-16): 渠道仓到货时间非空才算到货检查(为空=运输轨, 不催);
+        已到货停留锚点=到货时间, 目标空运15/海运35天, 四态=未到货/未超目标/逾期未确认/僵尸.
         全流程线: 空运60/海运69(时效确认规则表·口径说明); 启动日=Part1手机数据取得日期
         (缺省最早创建时间); 在途只看Part1~8; >{STALE_CAP_DAYS}天历史遗留不提醒; 段级为近似口径
         (环节内无进展超确认目标), 精确段口径以路线复盘为准."""
@@ -681,6 +683,12 @@ def register(registry, cfg: dict) -> int:
         skus = {}   # sku -> {model, start, pending:set, created, last_up, sign}
         seg_rows = []  # (超目标天数, idle, sku, part, target)
         part9_new = []  # (创建时间, sku, model, owner) Part9新单待办: 创建≤7天且审批中
+        # Part8 四态计数(2026-11-16 A档, docs/Part8卡点分析与优化建议.md):
+        # 未到货=运输轨(货在路上, 无检查动作可催) / 已到货正常 / 逾期未确认(该催) /
+        # 僵尸(>120天, 清理候选)。数字一律 单数+SKU数 双计量 —— 1022单 vs 32SKU
+        # 曾被当成矛盾, 其实差的是粒度(一个SKU 12~15个渠道仓, 中位11单)。
+        p8 = {"na_rows": 0, "transit_rows": 0, "overdue_rows": 0, "zombie_rows": 0}
+        p8_na_skus, p8_od_skus, p8_zombie_skus = set(), set(), set()
         fresh_time = None  # 全目录最新「更新时间」, 用于数据新鲜度硬判
         for f in files:
             part_no = "".join(ch for ch in f.stem if ch.isdigit())[:1]
@@ -702,6 +710,10 @@ def register(registry, cfg: dict) -> int:
             sign_col = next((c for c in df.columns if _is_sign_col(str(c))), None)
             signs = (pd.to_datetime(df[sign_col], errors="coerce")
                      if sign_col else None)
+            # Part8 专用: 渠道仓到货时间 = 到货检查的锚点列(938/1022 非空, 实测可信:
+            # 与审批记录「到货通知」日中位差 -1 天)。缺失列时退回更新时间锚(旧行为)。
+            arr = (pd.to_datetime(df["渠道仓到货时间"], errors="coerce")
+                   if part_no == "8" and "渠道仓到货时间" in df.columns else None)
             if updated is not None:
                 last = updated.max()
                 if pd.notna(last) and (fresh_time is None or last > fresh_time):
@@ -744,6 +756,40 @@ def register(registry, cfg: dict) -> int:
                     if sg is not None and pd.notna(sg) and (info["sign"] is None or sg < info["sign"]):
                         info["sign"] = sg
                 if is_pending and part_no != "9":
+                    # ---- Part8 专用分支(2026-11-16 A档) ----
+                    # 判据: 渠道仓到货时间**非空**才算「渠道仓到货检查」。为空 =
+                    # 货还在运输轨上, 没有任何检查动作可催, 不算卡Part8
+                    # (实测把 21 个运输中 SKU 从卡Part8里摘出去)。
+                    # 锚点: 停留 = 今天-到货时间, 不是更新时间 —— 2026-03-25 批量
+                    # 转交(杨晓莹→李杰华)把 151 单的更新时间刷成同一天, 更新锚测的
+                    # 是"最后审批动作", 不是"到货后等了多久", 47 个真逾期 SKU 曾被低估。
+                    if part_no == "8" and arr is not None:
+                        a8 = arr.iloc[i]
+                        tgt = targets.get(part, 1)
+                        if _sku_modes().get(sku) == "sea":
+                            tgt = 35
+                        if pd.isna(a8):
+                            p8["na_rows"] += 1
+                            p8_na_skus.add(sku)
+                            continue        # 运输轨: 不进 pending / 段级 / 四态以外
+                        idle = int((today - a8.normalize()).days)
+                        if idle > STALE_CAP_DAYS:
+                            p8["zombie_rows"] += 1
+                            p8_zombie_skus.add(sku)
+                            continue        # 僵尸单: 不进 pending(无可催), 清理候选
+                        p8["transit_rows" if idle <= tgt else "overdue_rows"] += 1
+                        if idle > tgt:
+                            p8_od_skus.add(sku)
+                        # part_up 写最早到货时间: _stage_of/_pending_flags 对 Part8 的
+                        # 「已持续N天/另挂已停N天」随之变成「到货后已等N天」, 与段级
+                        # 口径一致。取最早 = 按"等得最久的那张单"算, 不让新货件刷新掩盖。
+                        pu = info["part_up"].get(part_no)
+                        if pu is None or a8 < pu:
+                            info["part_up"][part_no] = a8
+                        info["pending"].add(part_no)
+                        if tgt < idle <= STALE_CAP_DAYS:
+                            seg_rows.append((idle - tgt, idle, sku, part, tgt))
+                        continue
                     info["pending"].add(part_no)
                     # 段级近似: 环节内无进展(最后更新)超该Part确认目标; Part8按运输方式
                     if u is not None and pd.notna(u):
@@ -797,7 +843,13 @@ def register(registry, cfg: dict) -> int:
                f"临期阈值{warn_days}天, 在途=Part1~8审批中, >{STALE_CAP_DAYS}天遗留不提醒; "
                f"段级停滞天数=今天-最后更新时间(归零), 对照该环节确认目标(近似, 按单据行可重复; "
                f"注意与scan_sync_data的停滞口径差异: 归零差~1天(封顶线已统一为{STALE_CAP_DAYS}天); "
-              f"Part9新单=创建≤7天且审批中, 悬挂旧单不提醒)",
+               f"Part9新单=创建≤7天且审批中, 悬挂旧单不提醒)",
+               # Part8 口径(2026-11-16 A档): 到货判据 + 到货锚点, 见四态总账。
+               # 不写明的话模型会把「未到货84单」也当卡Part8去催 —— 货在路上催不到。
+               "Part8口径(2026-11-16改): 渠道仓到货时间**非空**才算渠道仓到货检查; "
+               "为空=运输轨(货在路上), 不算卡Part8、行动建议不催; 已到货的停留锚点="
+               "到货时间(不是更新时间 —— 2026-03-25 批量转交刷过151单的更新时间)。"
+               "详见下方「Part8四态总账」, 引用数字带单位(N单/M SKU)。",
                # 目标天数的来源如实标注(2026-11-16): Part1 已于本日由 75 收紧为 13。
                # 模型若被问「为什么是13」, 输出里有据可依, 不必自己编口径出处。
                f"环节目标来源: {_caches.get(f'target_src:{line}', '内置常量')}; "
@@ -886,6 +938,14 @@ def register(registry, cfg: dict) -> int:
             out.append(f"  [按环节去重] {agg_line} (超目标在途单数, 同SKU多环节分别计)")
         for over_t, idle, sku, part, tgt in seg_rows[:n]:
             out.append(f"  {sku} {part} 停滞{idle}天/目标{tgt}天 (超{over_t}天)")
+        # Part8 四态总账(2026-11-16): 给模型可直接引用的带单位数字, 防止把
+        # 「审批中 1022 单」当成「32 个 SKU 卡Part8」或反过来 —— 粒度不同:
+        # 一个 SKU 对应 12~15 个渠道仓、中位 11 张单, 单数天然比 SKU 数大一个量级。
+        out.append(f"\n== Part8(渠道仓到货检查)四态总账(锚=渠道仓到货时间, 目标: 空运15/海运35天) ==")
+        out.append(f"  未到货·运输轨 —— 不算卡Part8, 别催: {p8['na_rows']}单/{len(p8_na_skus)}SKU (货在路上, 无可催动作)")
+        out.append(f"  已到货·未超目标: {p8['transit_rows']}单")
+        out.append(f"  已到货·逾期未确认(该催): {p8['overdue_rows']}单/{len(p8_od_skus)}SKU —— 到货后超目标未确认")
+        out.append(f"  已到货·僵尸(>{STALE_CAP_DAYS}天, 批量清理/豁免候选): {p8['zombie_rows']}单/{len(p8_zombie_skus)}SKU")
         part9_new.sort(key=lambda x: x[0])          # 最老的新单排前, 先到先办
         out.append(f"\n== Part9新单待办(创建≤7天且审批中, {len(part9_new)}单; 悬挂旧单不在此列) ==")
         for c9, sku9, mv9, owner9 in part9_new[:10]:
