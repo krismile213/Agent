@@ -7,15 +7,21 @@ plugins/rag.py — 通用混合检索插件 (BM25 + 向量 + RRF 融合 + LLM �
   - 双路召回: BM25(精确词/SKU编号强) + 向量(语义泛化), 各取top30
   - 融合: RRF(倒数排名融合, k=60) —— 免调权重的标准做法
   - 重排: LLM列表重排(top12→top_k), 失败自动退回RRF序
-  - 嵌入: OpenAI兼容 /embeddings(默认与对话同源的z.ai embedding-3, 2048维),
-    按chunk内容hash增量缓存 —— 只嵌入新/变更块, 重建索引近乎免费
+  - 嵌入: 默认本地 fastembed(BAAI/bge-small-zh-v1.5, 512维, ONNX免torch, 免费离线),
+    可选远程 OpenAI兼容 /embeddings(z.ai embedding-3); 按chunk hash增量缓存, 只嵌新/变更块
   - 降级: 嵌入不可用→纯BM25+RRF并在结果中注明; 无numpy→同样降级
+  - 后端/模型切换→自动全量重建向量(维度不兼容)
 
-配置(config.json):
+配置(config.json, 全部可省略用默认值):
   "rag_sources": [{"name": "work-main文档", "root": "C:\\\\...\\\\work-main",
                     "include": ["资产文件/**/*.md", "流程复盘/**/*.md", "README.md"]}]
-  "rag_embed": {"base_url": "...", "model": "embedding-3"}   # 可省略, 默认同对话端点
-  "rag_rerank": true                                          # 关掉省token
+  "rag_embed": {
+      "backend": "local",                          # local(默认,免费) / remote(付费API)
+      "local_model": "BAAI/bge-small-zh-v1.5",     # fastembed 模型名
+      "local_cache_dir": "D:\\dev-cache\\fastembed",# 模型缓存(默认D盘)
+      "base_url": "...", "model": "embedding-3"    # 仅 backend=remote 时用
+  }
+  "rag_rerank": true                               # 关掉省token
 """
 
 import hashlib
@@ -38,6 +44,10 @@ except ImportError:
     jieba = BM25Okapi = None
 
 import requests
+
+# 本地嵌入(fastembed/ONNX, 无需 torch): 模块级单例, 首次调用才加载
+_LOCAL_EMBEDDER = None
+_LOCAL_MODEL = "BAAI/bge-small-zh-v1.5"
 
 CACHE_DIR = core.HERE / "kb_cache"
 INDEX_JSON = CACHE_DIR / "index.json"
@@ -92,12 +102,22 @@ def _collect(sources: list) -> list:
     for src in sources:
         root = Path(src.get("root", "."))
         seen = set()
-        for pat in src.get("include", ["**/*.md"]):
-            for f in root.glob(pat):
-                if not f.is_file() or f.name.startswith("~$"):
+        # 按 include 模式轮询(round-robin)取文件: 避免海量"资产文件"先吃满
+        # MAX_FILES 配额, 把高价值的"流程复盘/docs"等源饿死在截断线外。
+        pats = src.get("include", ["**/*.md"])
+        buckets = []
+        for pat in pats:
+            files = [f for f in root.glob(pat)
+                     if f.is_file() and not f.name.startswith("~$")
+                     and f.stat().st_size <= MAX_FILE_BYTES]
+            buckets.append((pat, sorted(files)))  # sorted 保证确定性顺序
+        while any(b for _, b in buckets):
+            advanced = False
+            for pat, bucket in buckets:
+                if not bucket:
                     continue
-                if f.stat().st_size > MAX_FILE_BYTES:
-                    continue
+                f = bucket.pop(0)
+                advanced = True
                 key = str(f.resolve())
                 if key in seen:
                     continue
@@ -107,12 +127,63 @@ def _collect(sources: list) -> list:
                 except OSError:
                     continue
                 if len(docs) >= MAX_FILES:
-                    core.log(f"[rag] 达到文件上限{MAX_FILES}, 截断")
+                    core.log(f"[rag] 达到文件上限{MAX_FILES}, 截断"
+                             f"(按模式轮询, 各源均衡覆盖)")
                     return docs
+            if not advanced:
+                break
     return docs
 
 
-def _embed(texts: list, cfg: dict) -> list | None:
+def _embed_backend(cfg: dict) -> str:
+    """嵌入后端: local(默认, 免费离线) / remote(付费API)."""
+    return (cfg.get("rag_embed") or {}).get("backend", "local").lower()
+
+
+def _embed_model(cfg: dict) -> str:
+    emb = cfg.get("rag_embed") or {}
+    if _embed_backend(cfg) == "local":
+        return emb.get("local_model", _LOCAL_MODEL)
+    return emb.get("model", "embedding-3")
+
+
+def _local_embed(cfg: dict, texts: list) -> list | None:
+    """本地嵌入(fastembed + bge-small-zh), 模型单例, 缓存落 D 盘."""
+    global _LOCAL_EMBEDDER
+    if _LOCAL_EMBEDDER is None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError:
+            core.log("[rag] 本地嵌入不可用: 缺 fastembed (pip install fastembed)")
+            return None
+        emb = cfg.get("rag_embed") or {}
+        cache = emb.get("local_cache_dir", r"D:\dev-cache\fastembed")
+        model = _embed_model(cfg)
+        # 优先用手动下载好的本地模型目录(specific_model_path), 完全离线、绕开
+        # Windows 下 huggingface 下载器的符号链接/XET 校验坑; 目录不存在才回退自带下载
+        local_dir = Path(cache) / model.split("/")[-1]
+        try:
+            if (local_dir / "model_optimized.onnx").exists():
+                core.log(f"[rag] 加载本地嵌入模型 {model} (目录 {local_dir})...")
+                _LOCAL_EMBEDDER = TextEmbedding(
+                    model_name=model, cache_dir=cache,
+                    specific_model_path=str(local_dir))
+            else:
+                core.log(f"[rag] 加载本地嵌入模型 {model} (缓存 {cache}, 在线下载)...")
+                _LOCAL_EMBEDDER = TextEmbedding(model_name=model, cache_dir=cache)
+        except Exception as e:
+            core.log(f"[rag] 本地嵌入模型加载失败({str(e)[:100]}), 降级")
+            return None
+    try:
+        vecs = [list(v) for v in _LOCAL_EMBEDDER.embed(texts)]
+        return vecs
+    except Exception as e:
+        core.log(f"[rag] 本地嵌入推理失败({str(e)[:100]}), 降级")
+        return None
+
+
+def _remote_embed(cfg: dict, texts: list) -> list | None:
+    """远程嵌入(原 z.ai embedding-3 逻辑), 保留作可选后端."""
     emb_cfg = cfg.get("rag_embed") or {}
     base = emb_cfg.get("base_url") or cfg["base_url"]
     url = base.rstrip("/") + "/embeddings"
@@ -137,6 +208,13 @@ def _embed(texts: list, cfg: dict) -> list | None:
     return out if out and out[0] is not None else None
 
 
+def _embed(texts: list, cfg: dict) -> list | None:
+    """嵌入分发器: 按配置走本地/远程, 任一不可用统一返回 None 触发纯BM25降级."""
+    if _embed_backend(cfg) == "local":
+        return _local_embed(cfg, texts)
+    return _remote_embed(cfg, texts)
+
+
 def _build(cfg: dict, force: bool = False) -> str:
     if jieba is None or BM25Okapi is None:
         return "[错误] 缺依赖: pip install rank_bm25 jieba"
@@ -145,13 +223,23 @@ def _build(cfg: dict, force: bool = False) -> str:
         return "[错误] config.json 未配置 rag_sources"
     CACHE_DIR.mkdir(exist_ok=True)
 
+    cur_backend, cur_model = _embed_backend(cfg), _embed_model(cfg)
     old_hash2row = {}
     old_vecs = None
     if not force and VECS_NPZ.exists() and INDEX_JSON.exists():
         try:
-            z = np.load(VECS_NPZ, allow_pickle=False)
-            old_vecs, old_hashes = z["vecs"], list(z["hashes"])
-            old_hash2row = {h: i for i, h in enumerate(old_hashes)}
+            old_meta = json.loads(INDEX_JSON.read_text("utf-8")).get("meta", {})
+            # 后端/模型变了 → 旧向量维度不兼容, 丢弃重嵌(否则矩阵乘法崩)
+            backend_same = old_meta.get("embed_backend", "remote") == cur_backend
+            model_same = old_meta.get("embed_model", "embedding-3") == cur_model
+            if not (backend_same and model_same):
+                core.log(f"[rag] 嵌入配置变化({old_meta.get('embed_backend','remote')}/"
+                         f"{old_meta.get('embed_model','embedding-3')} → "
+                         f"{cur_backend}/{cur_model}), 全量重建向量")
+            else:
+                z = np.load(VECS_NPZ, allow_pickle=False)
+                old_vecs, old_hashes = z["vecs"], list(z["hashes"])
+                old_hash2row = {h: i for i, h in enumerate(old_hashes)}
         except Exception:
             pass
 
@@ -193,6 +281,7 @@ def _build(cfg: dict, force: bool = False) -> str:
             "files": len(docs), "chunks": len(chunks),
             "dim": int(np.shape(rows[0])[0]) if has_vec and rows else 0,
             "has_vec": has_vec,
+            "embed_backend": cur_backend, "embed_model": cur_model,
             "sources": [s.get("name", "?") for s in sources]}
     INDEX_JSON.write_text(json.dumps(
         {"meta": meta, "chunks": chunks,
@@ -307,9 +396,10 @@ def register(registry, cfg: dict) -> int:
         if st is None:
             return "索引未构建(首次使用 kb_search 会自动构建, 或显式调用 kb_build)"
         m = st["index"]["meta"]
+        emb = f"{m.get('embed_backend','remote')}/{m.get('embed_model','embedding-3')}"
         return (f"索引: {m['files']}文件 / {m['chunks']}块 / "
-                f"向量{'启用' if m['has_vec'] else '未启用'} (构建于 {m['built']}, "
-                f"来源: {', '.join(m['sources'])})")
+                f"向量{'启用' if m['has_vec'] else '未启用'}(dim={m.get('dim',0)}, {emb}) "
+                f"(构建于 {m['built']}, 来源: {', '.join(m['sources'])})")
 
     def t_kb_search(query: str, top_k: int = 4) -> str:
         if jieba is None or BM25Okapi is None:
