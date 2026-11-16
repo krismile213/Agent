@@ -33,6 +33,7 @@ FAST = [
     ("research防幻觉防线", [sys.executable, "scripts/test_research_guard.py"]),
     ("数据新鲜度防线", [sys.executable, "scripts/test_freshness.py"]),
     ("数据新鲜度三态守卫", [sys.executable, "scripts/test_freshness_guard.py"]),
+    ("联合监听内核", [sys.executable, "scripts/test_watch_core.py"]),
     ("失败模式复盘单测", [sys.executable, "scripts/test_session_analysis.py"]),
     ("空简报防线", [sys.executable, "scripts/test_brief_guard.py"]),
     ("简报格式兜底", [sys.executable, "scripts/test_brief_format.py"]),
