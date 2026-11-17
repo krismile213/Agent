@@ -3,9 +3,14 @@ rem =====================================================================
 rem  AgentPulseIncrement scheduled task launcher  (ASCII only)
 rem
 rem  T1 incremental pulse from docs/分层同步框架.md.
-rem  Runs every 15 min at :07/:22/:37/:52 (task StartBoundary controls the
-rem  offset so we never land on :00/:59 where the script self-skips, and
-rem  stay clear of T0 at 08:40/13:59).
+rem  Runs every 30 min at :07/:37 since 2026-11-17 (tuned down from 15 min
+rem  after day-one stats: 63 of 66 rounds wrote nothing, so 15 min was
+rem  pure duplicate API load). StartBoundary :07 keeps us off :00/:59
+rem  where the script self-skips, and clear of T0 at 08:40/13:59.
+rem
+rem  Launched by the scheduled task through run_hidden.py (pythonw +
+rem  CREATE_NO_WINDOW) so nothing flashes on the desktop. Do NOT point
+rem  the task at this .bat directly - a console window will show.
 rem
 rem  The script defaults to DRY; --live is passed here so the scheduled
 rem  task actually writes the archive DB (never xlsx). LIVE is safe:
