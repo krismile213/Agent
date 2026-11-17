@@ -1,0 +1,1579 @@
+
+===== 内核自检 =====
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+[自检] 沙箱: D:\Desktop\Agent  已注册工具: read_file, list_dir, grep, write_file, undo_write, run_python, save_memory, recall_memory, load_skill, dingtalk_send, research, kb_search, kb_build, kb_status, query_batches, get_product_info, query_sku_route, search_kb, sync_status, scan_sync_data, pipeline_alerts, inflight_report, pipeline_trend, run_route_check, platform_batches, platform_overview, platform_sku_route, platform_alerts, platform_transport, platform_records, platform_inflight_overview, platform_inflight_alerts, platform_daily_report, platform_deltas
+  PASS  路径越界拦截
+  PASS  write_file 写入
+  PASS  read_file 读取
+  PASS  grep 检索
+  PASS  run_python 执行(含中文编码)
+  PASS  list_dir 列目录
+  PASS  未知工具报错回灌
+[自检] 通过 7 项, 失败 0 项
+
+===== 反思闭环单测 =====
+[单测] 反思闭环机制
+  PASS  通过判定启发式(9组边界)
+  PASS  修正轮被触发(fix_round事件)
+  PASS  返回修正稿
+  PASS  历史含[反思修正]指令
+  PASS  反思通过时不触发修正轮
+[test_reflect_fix] 通过 5 项, 失败 0 项
+
+===== 多轮增强单测 =====
+[单元] 记忆与恢复加固
+  PASS  save_memory 写入
+  PASS  save_memory 双写当天日志
+  PASS  MEMORY.md 注入系统提示
+  PASS  悬空tool_calls补合成结果
+  PASS  合成结果位置正确(调用之后/新消息之前)
+[test_upgrade] 通过 5 项, 失败 0 项
+
+===== 高级能力单测 =====
+[单测] 子agent/角色/核查/计划/分步
+  PASS  子agent返回最终结论
+  PASS  子agent注册表为只读(write_file被拒)
+  PASS  角色注入子agent系统提示
+  PASS  工具白名单生效(仅grep/list_dir)
+  PASS  白名单无交集时报错回灌
+[research] 子任务1 完成: 问题一
+[research] 子任务2 完成: 问题二
+  PASS  verify追加核查员调用
+  PASS  结果含角色标注与[核查]节
+  PASS  任务对象解析(2子任务+1核查)
+[research] 子任务1 完成: 甲任务
+[research] 子任务2 完成: 乙任务
+[research] 子任务3 完成: 丙任务
+  PASS  research 扇出汇总(3任务)
+[research] 子任务1 完成: a
+[research] 子任务2 完成: b
+[research] 子任务3 完成: c
+[research] 子任务4 完成: d
+  PASS  research 硬上限4个任务
+[research] 子任务1 完成: 单个字符串也接受
+  PASS  research 接受单字符串
+[plan] 生成计划中...
+[plan] 计划已生成(28字符)
+[plan] 等待用户批准...
+  PASS  计划批准后执行
+  PASS  计划事件流(plan→plan_approved)
+  PASS  计划注入任务指令
+[plan] 生成计划中...
+[plan] 计划已生成(6字符)
+[plan] 等待用户批准...
+  PASS  计划否决后不执行
+[plan] 生成计划中...
+[plan] 计划已生成(37字符)
+[plan] 等待用户批准...
+  PASS  分步执行完成全部3步
+  PASS  step事件流(steps + 3x step_done)
+  PASS  修改指令注入历史
+[plan] 生成计划中...
+[plan] 计划已生成(37字符)
+[plan] 等待用户批准...
+  PASS  step_confirm停止生效
+[test_advanced] 通过 19 项, 失败 0 项
+
+===== 安全拦截单测 =====
+[单测] AST拦截矩阵 / 包裹 / 注入扫描
+  PASS  危险代码拦截(11类全拦)
+  PASS  正常代码放行(4例零误拦)
+  PASS  run_python工具侧生效(安全拦截文案)
+  PASS  包裹含标签与非指令声明
+  PASS  注入扫描命中
+  PASS  正常文本不误报
+  PASS  注入时包裹附[!]提示
+[test_security] 通过 7 项, 失败 0 项
+
+===== 人工干预三件套 =====
+[单测] 人工干预三件套(追加指令/外发双确认/批量审批)
+  PASS  空收件箱drain为空
+  PASS  入队顺序与去空白
+  PASS  drain后清空
+  PASS  任务正常完成
+  PASS  发出instruction_injected事件
+  PASS  第2轮LLM已看到追加指令
+  PASS  注入消息在user边界(历史结构合法)
+  PASS  无追加指令时不注入不发事件
+  PASS  第一段=草稿确认
+  PASS  第二段=发送确认
+  PASS  两段都批 → 允许
+  PASS  external不吃总允许
+  PASS  草稿拒绝 → 直接拒绝(无第二段)
+  PASS  发送段拒绝 → 不外发
+  [外发草稿] 标题: t
+正文: x
+  PASS  CLI: 两段y → 允许且不入总允许
+  [外发草稿] 标题: t
+正文: x
+  PASS  CLI: 草稿n → 拒绝
+  [外发草稿] 标题: t
+正文: x
+  PASS  CLI: 发送段n → 拒绝
+  [写操作] write_file({})
+  PASS  回归: write级'a'总允许不变
+[dispatch] permission_resolved seq=1 subs=0
+[dispatch] permission_resolved seq=2 subs=0
+[dispatch] permission_resolved seq=3 subs=0
+  PASS  批量批准2生效+1失效
+  PASS  批量后PENDING清空
+  PASS  pending清单可查
+  PASS  未运行时enqueue报400
+[dispatch] instruction_queued seq=4 subs=0
+  PASS  运行中enqueue成功
+  PASS  指令进入引擎收件箱
+  PASS  dingtalk_send已注册且为external级
+  PASS  草稿预览含标题与正文
+  PASS  dry_run不实际发送
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+[晨检] 无人值守模式: 摘除写级工具 7 个, 保留只读 27 个
+  PASS  晨检只读注册表已摘除external工具
+[test_human_intervention] 通过 28 项, 失败 0 项
+
+===== research防幻觉防线 =====
+
+== _mark_unsourced ==
+  ✓ 整块无来源标记 -> 块级预警
+  ✓ 有标记块不被整块预警
+  ✓ 缺来源的数字要点被行级标注
+  ✓ 带来源的要点行不动
+  ✓ 无数字的建议行不误伤
+  ✓ 中文冒号来源可识别
+  ✓ 英文 source 标记可识别
+  ✓ 原文无额外污染
+
+== _parse_verdicts ==
+  ✓ 三条全部解析
+  ✓ 通过判定
+  ✓ 存疑+原因
+  ✓ 证伪(中文冒号/无破折号)
+  ✓ 乱文本不崩且为空
+  ✓ 同条目重复取最后一次
+
+== _quarantine ==
+  ✓ 无问题条目原地不动
+  ✓ 存疑条目原地降级为占位
+  ✓ 原文移到隔离区
+  ✓ 隔离区有显著边界
+  ✓ 证伪标记
+  ✓ 无存疑时原样返回
+  ✓ 空裁决不崩不变
+
+== _assemble_research (截断bug) ==
+  ✓ 正文超长时核查段仍在(修复点)
+  ✓ 核查段近乎完整保留
+  ✓ 无核查时维持 10k 上限
+  ✓ 核查段自身封顶 3000
+  ✓ 总预算不超 ~12k
+
+==============================================
+[research 防线单测] 26/26 通过
+
+===== 数据新鲜度防线 =====
+
+== _stale_note 纯函数 ==
+  ✓ 今天的数据(0天) -> 无告警
+  ✓ 昨天(1天) -> 无告警
+  ✓ 整2天(=warn_days, 不严格大于) -> 无告警
+  ✓ 3天 -> 告警
+  ✓ 告警含'断供期'提示
+  ✓ 告警带数据截至时间戳
+  ✓ warn_days=1 时 2天 -> 告警
+  ✓ None -> 不可信告警
+
+== _latest_parts 新旧并存免疫 ==
+  ✓ 同环节新旧并存 -> 只留最新一份
+  ✓ 锁文件(~$)被排除
+  ✓ 不同环节各自保留
+  ✓ 结果按文件名排序
+  ✓ 无时间戳后缀的裸名文件不丢
+
+== Part9 新单提醒(离线夹具) ==
+  ✓ Part9新单层存在
+  ✓ 新单(2天)进Part9层
+  ✓ 悬挂旧单(60天)不进
+  ✓ 已结束单不进Part9层
+  ✓ 声明数量=1单
+
+== 最近一个月新增SKU窗口+签样(离线夹具) ==
+  ✓ 单一真源 NEW_SKU_WINDOW_DAYS=40
+  ✓ 签样目标 膜12/壳87
+  ✓ 新层标题=最近40天新增SKU
+  ✓ 声明 2 个(20天进/45天出/15天进)
+  ✓ 窗口内20天单(G701)进层
+  ✓ 出窗口45天单(G702)不进层
+  ✓ 窗口内15天单(G703)进层
+  ✓ 未签样超目标标⚠️(G701)
+  ✓ 已签样显示签样日期(G703)
+  ✓ 已签样带当前环节+时效(G703)
+  ✓ 未签样汇总行存在
+  ✓ _ship_tag 渲染地区+货件号
+  ✓ _ship_tag 超限折叠为共N个
+  ✓ _ship_tag 无记录为空串
+
+== 停滞封顶线统一 120(离线夹具) ==
+  ✓ 单一真源 STALE_CAP_DAYS=120
+  ✓ 标签=近120天
+  ✓ 标签=>120天历史遗留
+  ✓ 95天单进TOP(决定性: 旧口径90封顶会错标遗留)
+  ✓ 110天单进TOP
+  ✓ 85天单进TOP
+  ✓ 125天单不进TOP(封顶语义不变)
+  ✓ 125天单计入历史遗留
+  ✓ 已结束单不进停滞层
+  ✓ 标签=>120天遗留不提醒
+  ✓ 口径注已更新(封顶线已统一)
+  ✓ 段级: 30天单进(30>目标15且<=120)
+  ✓ 段级: 125天单被段级封顶排除
+  ✓ 段级: 119天单被超期层优先截走(既有行为)
+  ✓ 全流程线: 125天单计入历史遗留
+
+== sync_status 结论行(离线夹具) ==
+  ✓ 有且仅有一条结论行
+  ✓ 结论行在日志尾部之前
+  ✓ 成功场判✅
+  ✓ 成功结论带导出文件数
+  ✓ 成功结论声明无ERROR
+  ✓ ERROR场判❌
+  ✓ ❌结论带ERROR条数
+  ✓ 刚更新无结束行判⏳
+  ✓ 久未更新无结束行判❌中断
+
+== 真跑工具(只读本地, 零LLM) ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  ✓ scan 含数据截至行
+  ✓ scan 告警与数据新鲜度自洽
+  ✓ scan 口径注仍在
+  ✓ pipeline 含数据截至行
+  ✓ pipeline 口径注仍在
+  ✓ pipeline 新增层=最近40天(含签样追踪)
+  ✓ pipeline Part9新单层存在
+  ✓ Part9新单 声明与明细一致
+  ✓ sync 含日志时效行
+  ✓ 超24h时有停摆告警格式
+
+==============================================
+[新鲜度防线单测] 66/66 通过
+
+===== 数据新鲜度三态守卫 =====
+
+== 纯函数三态 ==
+  PASS  10min → fresh
+  PASS  46min → stale
+  PASS  stale 横幅带数据截至时刻
+  PASS  8h+ → blocked
+  PASS  44min(边界内) → fresh
+
+== 归档库超越快照 ==
+  PASS  库比快照新 10s(同轮写入顺序) → 不误伤
+  PASS  库比快照新 >120s → blocked
+  PASS  blocked 横幅明确禁催
+
+== 快照缺失 ==
+  PASS  快照取不到 → blocked(不假装新鲜)
+  PASS  快照缺失横幅提示 sync_status
+
+== daily_brief 收尾禁催 ==
+  PASS  blocked → 替换 ⑥
+  PASS  ⑥ 不再点名 SKU
+  PASS  ⑥ 写暂缓提示
+  PASS  ③ 数据段没被误动
+  PASS  stale → 不替换(仍要催)
+  PASS  无横幅 → 不替换
+
+== workmain IO 采集 ==
+  PASS  快照 mtime 采集为 datetime
+  PASS  快照 mtime 年份合理
+  PASS  归档库 finished_at 采集为 datetime
+
+==============================================
+[数据新鲜度守卫单测] 19/19 通过
+
+===== 联合监听内核 =====
+
+== normalize / fingerprint ==
+  PASS  去首尾空白
+  PASS  None → 空串
+  PASS  剔除技术字段 updated_at
+  PASS  业务字段「更新时间」保留
+  PASS  嵌套 dict 稳定序列化
+  PASS  非 dict 包成 __raw__ 不崩
+
+== 指纹稳定性（updated_at 不参与）==
+  PASS  键顺序不同 + updated_at 变了 → 同指纹
+  PASS  业务字段变了 → 指纹变
+
+== 字段级 diff ==
+  PASS  只报变化字段
+  PASS  未变字段不出现
+  PASS  超长值截断
+
+== 快照 diff 三态 ==
+  PASS  k1 → updated
+  PASS  k2 → deleted
+  PASS  k3 → created
+  PASS  updated 只带 1 个字段变化
+
+== 端到端：基线 → 变更 → 幂等 → 新增/删除 ==
+  PASS  首轮只建基线，不产事件
+  PASS  首轮扫到 2 行 + 1 轮批次
+  PASS  扫描不改源库（mtime/size 不变）
+  PASS  全表刷 updated_at → 0 事件（不误报）
+  PASS  业务字段变更 → 1 条 updated
+  PASS  changes 只含「状态」
+  PASS  old/new 正确
+  PASS  新增行 → created
+  PASS  删除行 → deleted
+  PASS  同快照再扫一次 → 幂等 0 事件
+  PASS  事件已落库且可 tail
+
+== 一轮同步 → 一条 sync_finished ==
+  PASS  一轮同步聚合为 1 条事件
+  PASS  kind = sync_finished
+  PASS  part_count 聚合为 2
+
+== Part 文件源：品类隔离 + mtime 变化 ==
+  PASS  两个品类各 1 个 Part1（key 带品类，不串号）
+  PASS  key 含品类前缀
+  PASS  mtime 变化 → 1 条事件
+  PASS  事件实体是手机膜
+
+== 坏源降级 ==
+  PASS  三个坏源全部 skipped 不崩
+  PASS  skipped 有可读原因
+  PASS  整轮仍记录审计
+
+== --emit-baseline ==
+  PASS  基线事件 kind=baseline
+  PASS  基线事件数 = 行数
+
+==============================================
+[联合监听内核单测] 38/38 通过
+
+===== T1增量脉冲 =====
+临时副本: C:\Users\dell\AppData\Local\Temp\pulse_test_ulyxw6wg
+选中在途单: 手机膜|Part1_产品开发|EDId-pcYSI26HF2W status=RUNNING
+  report stats: {'duration_sec': 0.0, 'api_calls': 0, 'qps_hits': 0, 'candidates': 43, 'excluded_part8': 0, 'pulled_detail': 1, 'skipped_still_running': 0, 'skipped_unchanged': 0, 'changed_written': 1}
+  ✓ 状态变化的单已写回缓存
+  ✓ 归档库行数不变(upsert非新增)
+  ✓ row_json 审批状态已更新
+  ✓ row_json 含全部 TAIL_COLS
+  ✓ 重复跑幂等(行数不增)
+  ✓ 仍在途的单跳过详情拉取
+  ✓ 跳过计数正确
+  ✓ 未调用 export_part(不写xlsx)
+  ✓ 未调用 wb.save
+
+结果: 9 passed, 0 failed
+
+===== 失败模式复盘单测 =====
+
+== load_db_stats 聚合 ==
+  ✓ 只读保证: 跑完库字节不变
+  ✓ available=True
+  ✓ llm_total=4
+  ✓ 4.7-flash: 1调用0错0重试
+  ✓ 4.5-flash: 2调用2次触发重试
+  ✓ 失败明细2条里的error=1条
+  ✓ tool_total=4 失败2
+  ✓ 失败工具: list_dir/read_file 各1
+  ✓ 任务状态: ok=2 empty=1 running=1
+  ✓ 异常任务2个(empty+running各1)
+  ✓ 审批: tool allowed1/denied2 + plan denied1
+
+== 库缺失/损坏降级 ==
+  ✓ 缺失库: available=False 且带 note
+  ✓ 坏库: 不抛异常, available=False
+
+== load_jsonl_stats ==
+  ✓ 2个文件
+  ✓ kind 分布: message6/reflect1/end2
+  ✓ end reason: brief1/exit1
+  ✓ reflect=1
+  ✓ 工具错误归一: '未注册的工具'×2(不同工具名归一类)
+  ✓ 路径误用1次
+  ✓ 时间窗起=09:30:01
+  ✓ 时间窗止=14:10:31
+  ✓ 目录缺失: files=0 不抛异常
+
+== derive_findings 规则触发 ==
+  ✓ F1 幻觉工具名触发(2次<3? 夹具仅2次→不触发)
+  ✓ F1 3次幻觉→触发
+  ✓ F2 路径误用2次→触发
+  ✓ F4 重试率触发(2/4=50%≥30%)
+  ✓ F6 空结果任务触发
+  ✓ F7 running残留触发
+  ✓ F9 审批拒绝率触发(3/4=75%)
+  ✓ 全绿场景: 0 条建议
+
+== render_markdown ==
+  ✓ 标题带日期
+  ✓ 含 ## 1. LLM 调用面
+  ✓ 含 ## 2. 工具调用面
+  ✓ 含 ## 3. 任务面
+  ✓ 含 ## 4. 审批面
+  ✓ 含 ## 5. 会话 jsonl 面
+  ✓ 含 ## 6. 行动建议
+  ✓ LLM 表含模型行
+  ✓ 工具失败明细含秒失败提示
+  ✓ 异常任务列出 task 编号
+  ✓ 建议带编号
+
+[总览] 失败模式复盘单测: 41/41
+
+===== 空简报防线 =====
+
+== chat_stream 空流检测 ==
+  [重试] 第1次流式调用失败(空流(无content且无tool_calls, 疑似服务端过载掐断)), 2s后重试
+  [警告] LLM流式调用失败重试第1次(RuntimeError)
+  ✓ 空流触发重试且正文完整
+  ✓ 重试换到备用模型
+  [重试] 第1次流式调用失败(空流(无content且无tool_calls, 疑似服务端过载掐断)), 2s后重试
+  [警告] LLM流式调用失败重试第1次(RuntimeError)
+  [重试] 第2次流式调用失败(空流(无content且无tool_calls, 疑似服务端过载掐断)), 4s后重试
+  [警告] LLM流式调用失败重试第2次(RuntimeError)
+  ✓ 3连空流抛RuntimeError
+  ✓ 3连空流恰好打满3次
+  ✓ tool_calls轮不误杀
+  ✓ tool_calls轮无重试
+
+== chat 非流式空响应 ==
+  [重试] 第1次调用失败(空响应(无content且无tool_calls, 疑似服务端过载)), 2s后重试
+  [警告] LLM调用失败重试第1次(RuntimeError)
+  ✓ 非流式空响应重试成功
+  ✓ 非流式重试换模型
+
+== ensure_brief_answer 兜底 ==
+  ✓ 达标正文直通
+  ✓ 空正文重生成成功
+  ✓ 尾部空assistant被弹出
+  ✓ 追加纯生成指令
+  ✓ 首次退避20s
+  ✓ 重生成仍短返回原值
+  ✓ 尾部带tool_calls的assistant不弹
+  ✓ 下限=100字符
+
+==============================================
+[空简报防线单测] 16/16 通过
+
+===== 简报格式兜底 =====
+============================================================
+[简报格式兜底单测] normalize_brief_md
+
+== test_bare_sku_lines_get_bullets ==
+  ✓ 裸条目前置 bullet
+  ✓ 条目文字一个字符没动
+  ✓ 条目数不变(没漏没并)
+
+== test_inline_joined_entries_split ==
+  ✓ 空格串行拆成 3 条
+  ✓ 拆开后仍是同一批条目
+
+== test_semicolon_joined_split ==
+  ✓ 分号串行拆成 2 条
+
+== test_group_label_inline_entry_split ==
+  ✓ 组标签单独成行
+  ✓ 首条目落到 bullet 行
+
+== test_no_false_split_in_arrival_brackets ==
+  ✓ 到货信息整条不被拆断
+  ✓ 货件号逐字符原样
+
+== test_dup_h1_title_removed ==
+  ✓ LLM 多写的大标题被去掉
+  ✓ 小节标题保留
+
+== test_list_markers_unified ==
+  ✓ '- ' 归一为 '• '
+  ✓ '1. ' 归一为 '• '
+
+== test_plain_lines_untouched ==
+  ✓ 普通句原样
+  ✓ 引用块原样
+  ✓ 空行结构保留
+
+== test_empty_and_none ==
+  ✓ None 直通不炸
+  ✓ 空串直通
+
+== test_section_titles_canonical ==
+  ✓ 晨检长标题 → 固定短标题
+  ✓ 午后长标题 → 同一短标题(两轮对齐)
+  ✓ ①~⑥ 全部有规范标题
+  ✓ 无#小节标题也被规范
+
+== test_section1_lines_get_bullets ==
+  ✓ ① 两行都变 bullet
+  ✓ 数据截至内容没改
+  ✓ 断供警示句不加 bullet
+
+== test_dup_and_double_bullet ==
+  ✓ 重复条目被去重
+  ✓ 没有双 bullet
+  ✓ 裸条目补成单 bullet
+  ✓ 跨小节不去重
+
+== test_compose_daily_merged ==
+  ✓ 只有一份文档(标题是日报)
+  ✓ 晨检段在前、午后段在后
+  ✓ 六节降到三级标题
+  ✓ 两段各带用量
+  ✓ 段落间有分隔线
+  ✓ 能读回晨检基线
+  ✓ 读回标题保留时间
+  ✓ 重跑不叠第二段午后
+  ✓ 重跑后晨检条目没丢
+  ✓ 重跑后旧午后内容被替换
+
+== test_compose_pm_only_when_morning_missing ==
+  ✓ 标注晨检缺档
+  ✓ 没有空晨检段
+
+== test_refine_delta_filters_false_new ==
+  ✓ ④⑤ 的 SKU 明细被过滤
+  ✓ 基线内 SKU 不回显
+  ✓ 基线外的「新增」也不回显(不是真新增)
+  ✓ 计数行保留
+  ✓ ③ 不被误删
+  ✓ 空小节补与晨检一致
+
+== test_parse_and_apply_counts ==
+  ✓ 临期计数
+  ✓ 已超期计数(取全流程线, 不是历史遗留)
+  ✓ 停滞计数
+  ✓ ④ 用工具计数
+  ✓ ⑤ 总数不被模型写小
+  ✓ ⑤ 停滞单列一行
+  ✓ ⑥ 未被改动
+  ✓ 小节之间仍有空行
+  ✓ ④⑤ 标题下不额外空行
+  ✓ ⑥ 假增量数字被去掉
+  ✓ ⑥ 动作对象保留
+
+== test_load_morning_strips_separator ==
+  ✓ 基线里没有分隔线
+  ✓ 重排后只有一条分隔线
+
+== test_real_brief_idempotent ==
+  ✓ 真实简报: SKU 出现次数守恒(没吞条目)
+  ✓ 真实简报: ③④ 全部变成 bullet
+  ✓ 真实简报: 无条目残留裸行(⑤ 组标签除外)
+
+== test_resolve_run_slot_explicit_beats_clock ==
+  ✓ --pm 在上午也判午后
+  ✓ --am 在深夜也判晨检
+  ✓ --pm + --am 互斥抛错
+
+== test_resolve_run_slot_clock_fallback ==
+  ✓ 12点前→晨检
+  ✓ 12点后→午后
+
+== test_pm_label_carries_tag ==
+  ✓ 午后段标题带 PM
+  ✓ 晨检段不带 PM
+  ✓ 更新记录里也带 PM
+
+== test_scrub_echo_line_dropped ==
+  ✓ 回声: 指令原句整行被清掉
+  ✓ 回声: 正常条目不受影响
+
+== test_scrub_midline_injection ==
+  ✓ 中途注入(括号闭合): 截断保留数据
+  ✓ 中途注入(括号闭合): 注入文本消失
+  ✓ 中途注入(括号未闭合): 整行丢弃, 不留半条货件号
+
+== test_scrub_consecutive_repeats ==
+  ✓ 复读: 30 行重复只留 1 行
+
+== test_duplicate_section_header_collapsed ==
+  ✓ 重复小节标题: 只保留一个
+  ✓ 重复小节标题: 两组内容都在
+
+== test_brief_health_signals ==
+  ✓ 体检: 抓到提示词回声
+  ✓ 体检: 抓到括号未闭合
+  ✓ 体检: 抓到连续重复行
+  ✓ 体检: 空正文报错
+  ✓ 体检: 渲染段的重复行不误报
+  ✓ 体检: 渲染段不误报括号未闭合
+  ✓ 体检: 干净正文零问题
+
+== test_health_detects_fabricated_skus ==
+  ✓ 编造检测: 抓到工具输出里没有的 SKU
+  ✓ 编造检测: 点出 G531
+  ✓ 编造检测: 不冤枉 ③ 里的真实 SKU(只看②)
+  ✓ 编造检测: 照抄工具的真实条目零问题
+  ✓ 编造检测: 不给工具输出时不判(无从比对)
+
+== test_render_dynamic_section ==
+  ✓ 动态渲染: 0 单写今日无新增动态
+  ✓ 动态渲染: Part9 计数只算 2 单
+  ✓ 动态渲染: 停滞段没串进 Part9
+  ✓ 动态渲染: 有明细时逐条照抄
+  ✓ 动态渲染: 不是这套工具输出时返回 None
+  ✓ 动态替换: 命中并替换
+  ✓ 动态替换: ③ 不受影响
+  ✓ 动态替换: 替换后体检通过
+
+== test_drop_ghost_action_items ==
+  ✓ ⑥ 清理: 删掉 2 条假 SKU 建议
+  ✓ ⑥ 清理: G531/G532 消失
+  ✓ ⑥ 清理: 真实 SKU 的建议保留
+  ✓ ⑥ 清理: 全删空时给兜底文案
+  ✓ ⑥ 体检: 抓到假 SKU
+
+== test_carry_over_actions ==
+  ✓ 承接: 补回 2 条
+  ✓ 承接: G592 回来了
+  ✓ 承接: 标了「晨检提出, 仍未推进」
+  ✓ 承接: 「无新增动作」被去掉
+  ✓ 承接: 午后已提过 G592 不重复
+  ✓ 承接: 数据里查不到的 SKU 不硬补
+  ✓ 承接: 没有工具输出时不动
+
+== test_fix_sku_counts ==
+[⑥] 数量校正: 共8个 → 共7个
+  ✓ ⑥ 数量: 区间4+2+单1 → 共7个
+  ✓ ⑥ 数量: 本来正确的 共3个 不动
+  ✓ ⑥ 数量: 只改 1 条
+  ✓ ⑥ 数量: 无「共N个」的行不动
+  ✓ ⑥ 数量: 「等N个」不校正(总数不可推)
+  ✓ ⑥ 数量: 无⑥段安全返回
+
+== test_render_data_sections ==
+  ✓ 渲染: 三节齐全
+  ✓ 渲染: ③ 条目带 bullet
+  ✓ 渲染: ③ 保留未签样尾注
+  ✓ 渲染: ④ 货件号逐字符照搬
+  ✓ 渲染: ④ 带计数行(午后对数用)
+  ✓ 渲染: ④ 计数可被 parse_counts 认出
+  ✓ 渲染: ⑤ 计数行写法对齐 _CNT_OVER
+  ✓ 渲染: ⑤ 两组都在
+  ✓ 渲染: 货件号没被截断
+  ✓ 渲染: 计数可被 parse_counts 认出
+  ✓ 渲染: 空输入不炸
+
+== test_render_data_sections_zero_warn ==
+  ✓ 零临期: 段被替换掉了(前置条件)
+  ✓ 零临期: ④ 仍然出节
+  ✓ 零临期: 写的是 0 个而不是省略
+  ✓ 零临期: 有条目占位(不是空节)
+  ✓ 零临期: 计数可被 parse_counts 认出
+
+== test_replace_data_sections_overrides_garbage ==
+  ✓ 覆盖: ③④⑤ 三节都被替换
+  ✓ 覆盖: 垃圾文本消失
+  ✓ 覆盖: 半截货件号消失
+  ✓ 覆盖: 完整货件号回来了
+  ✓ 覆盖: 标题只出现一次
+
+== test_placeholder_sections_never_reach_disk ==
+  ✓ 占位符: normalize 后不留 [系统自动填充]
+  ✓ 占位符: normalize 后不留 （由系统填充）
+  ✓ 占位符: 六节标题都还在
+  ✓ 占位符: 替换后 ③④⑤ 都有条目
+
+== test_render_dedupes_identical_rows ==
+  ✓ 去重: 相同行只留一条
+  ✓ 去重: 不同 SKU 都保留
+
+== test_replace_data_sections_inserts_missing ==
+  ✓ 补齐: ③⑤ 补上、④ 覆盖
+  ✓ 补齐: 六节顺序正确
+  ✓ 补齐: ④ 原有内容被覆盖
+
+== test_replace_data_sections_h3_level ==
+  ✓ 三级标题: ③⑤ 被替换、④ 补上
+  ✓ 三级标题: ③ 只出现一次
+  ✓ 三级标题: ⑤ 只出现一次
+  ✓ 三级标题: 层级不跳变(全是 ###)
+  ✓ 三级标题: 六节顺序正确
+
+== test_brief_health_requires_all_sections ==
+  ✓ 六节齐全: 不报缺节
+  ✓ 缺 ④: 报出来
+  ✓ 缺 ④: 默认(午后)不报 —— 增量只写变化
+
+== test_archive_layout_by_month ==
+  ✓ 月份取自日期前7位
+  ✓ 规范路径带月目录
+  ✓ 文件不存在时返回 None
+  ✓ 月目录里能找到
+  ✓ 扁平旧布局仍可读(归档切换过渡)
+
+============================================================
+[简报格式兜底单测] 全部通过
+
+===== Part环节名/素材通用 =====
+
+== PART_STAGE 常量完整性 ==
+  ✓ Part1~Part9 全覆盖
+  ✓ 每个 Part 都有环节名
+  ✓ Part3 = 本地仓到货检查
+  ✓ Part8 = 渠道仓到货检查
+  ✓ Part8 环节名不含「审批」
+
+== _stage_of/_pending_flags: 多环节并行与分环节停留 ==
+  ✓ 当前环节仍是 max(pending)=Part8
+  ✓ Part8 停留按自身更新(1天)
+  ✓ 超目标的 Part3 被标出(另挂17天/时效8天)
+  ✓ 未超目标的 Part5(17天/22天) 不标
+  ✓ 停留天数按该环节自身更新(10天而非9天)
+  ✓ 单环节在途 → 无另挂
+  ✓ 海运 Part8 时效 35 天
+  ✓ 海运下 Part8 自身不另挂(16<35)
+  ✓ 超120天封顶的段不进另挂
+  ✓ _pending_flags exclude 排除当前环节
+
+== _generic_material_map 判据 ==
+  ✓ 解析出 SKU 数 > 0
+  ✓ G593 判为素材通用
+  ✓ G593 依据含参考 SKU
+  ✓ G587 判为需拍摄
+  ✓ 通用与非通用都存在(判据没塌成一边)
+
+== _material_tag 只在未过 Part6 时标注 ==
+  ✓ Part3 通用 → 提示可跳过拍摄
+  ✓ Part3 通用 → 带节省天数
+  ✓ Part3 不通用 → 提示需拍摄
+  ✓ 卡Part7 → 不标注(已过素材段)
+  ✓ 卡Part8 → 不标注(已过素材段)
+  ✓ 卡Part9 → 不标注(已过素材段)
+  ✓ 卡空 → 不标注(已过素材段)
+  ✓ 查不到的 SKU → 不标注(不臆断)
+
+== pipeline_alerts 真实输出 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  ✓ 输出含 Part→环节 对照行
+  ✓ 对照行说明 Part8 是到货
+  ✓ 输出含流程依赖说明(Part3 拖 Part6)
+  ✓ 输出说明两个到货检查的区别(本地仓/渠道仓)
+  ✓ 签样追踪出现「另挂Part3」(双轨并行不被掩盖)
+  ✓ 停滞段带按环节汇总行
+  ✓ 汇总行含 Part3 计数
+  ✓ 条目带环节名「卡Part8(渠道仓到货检查)」
+  ✓ 不再出现裸编号「卡Part8)」
+  ✓ 卡 Part8 的条目不标素材通用
+  ✓ 输出含 Part8 四态总账段
+  ✓ 输出声明 Part8 到货判据(非空才算检查)
+  ✓ 四态行「未到货·运输轨」带双计数(N单/M SKU)
+  ✓ 四态行「已到货·逾期未确认」带双计数(N单/M SKU)
+  ✓ 四态行「已到货·僵尸」带双计数(N单/M SKU)
+
+== scan_sync_data 同样带环节名 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  ✓ 停滞TOP 带环节名
+  ✓ 停滞TOP 无裸编号
+
+==============================================
+[Part环节名/素材通用单测] 45/45 通过
+
+===== 环节目标单一真源 =====
+
+== Part1 收紧到 13 ==
+  ✓ Part1 = 13
+  ✓ Part1 来源=规则快照
+  ✓ Part1 不再是 75
+
+== Part2~Part7 与 xlsx 差 0 ==
+  ✓ Part2 一致
+  ✓ Part3 一致
+  ✓ Part4 一致
+  ✓ Part5 一致
+  ✓ Part6 一致
+  ✓ Part7 一致
+
+== None ≠ 0（缺失段不充数）==
+  ✓ 两段齐全 → Part1=13
+  ✓ 其余 Part 不产出
+  ✓ 缺失段被列出
+  ✓ 只有一段时不产出 Part1(不拿 1 充数)
+  ✓ available=False 视为缺失
+
+== 无源兜底 = 13（不是 75）==
+  ✓ 兜底 Part1 = 13
+  ✓ 兜底来源标注为内置常量
+  ✓ Part8/9 有值
+
+== 手机壳 Part1 不折算（先别动）==
+  ✓ 壳 Part1 不是折算值 13
+  ✓ 壳 Part2~7 仍按段折算
+
+== rules/ 不含人名 ==
+  ✓ 无责任人姓名
+
+== workmain 已接上快照（不再只读 xlsx）==
+  ✓ import rules.resolve_targets
+  ✓ 不再写死 Part1: 75
+  ✓ 输出带目标来源行
+
+== rules 公开 API 可导入 ==
+  ✓ rules 包导出 resolve_targets + describe_sources
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  ✓ workmain 输出不含解析失败痕迹
+  ✓ workmain 输出标注快照来源
+
+==============================================
+[环节目标单一真源单测] 26/26 通过
+
+===== 钉钉推送换行/分片 =====
+
+[1] bullet 逐行 → 独立段落(钉钉才真的换行)
+  ✓ ① 条目之间是空行分隔
+  ✓ ② 没有残留单换行粘连
+  ✓ ③ 标题与首条之间也隔开
+  ✓ ④ 条目数守恒
+
+[2] 非 bullet 行(②的"今日无新增动态" / ⑤的计数行)也独立成段
+  ✓ 计数行与首条之间断开
+  ✓ 三条各自成段
+
+[3] 原有多余空行被收敛(不会在群里刷出大段空白)
+  ✓ 不出现连续 3 个换行
+  ✓ 三个条目都在
+
+[4] 表格行保持连续(不能被拆成一段一段)
+  ✓ 表格三行用单换行相连
+  ✓ 表格前后仍与段落隔开
+
+[5] 超长正文分片: 每片≤上限, 不切半行, 不丢行
+  ✓ ① 分片数 > 1
+  ✓ ② 每片都 ≤ 1000 字
+  ✓ ③ 行数守恒(没丢条目)
+  ✓ ④ 每行都完整(没被拦腰切)
+  ✓ ⑤ 拼回去等于原文
+
+[6] 今天(2026-10-20)的晨检正文不再被 1800 字截断
+  ✓ ① 晨检正文 2753 字, 不再被 1800 截断
+  ✓ ② ⑤ 的末条 G585 在消息里
+  ✓ ③ 那句被砍断的货件号完整
+  ✓ ④ 分片数合理(≤3)
+  ✓ ⑤ 每片 ≤ 上限
+
+[7] send() 组包: 换行已硬化 + 分片标题带 (i/n), 不截断
+  ✓ ① 发送成功
+  ✓ ② 三条各自成段
+  ✓ ③ 标题只有一处
+  ✓ ④ 长文分成多片
+  ✓ ⑤ 分片标题带 (1/n)
+  ✓ ⑥ 每片 text ≤ 上限+标题
+  ✓ ⑦ 末条 G679 仍完整送达
+  ✓ ⑧ 片数说明
+
+✓ 全部通过
+
+===== Web新增端点 =====
+PASS raw 200
+PASS raw 内容正确
+PASS raw 内联(非附件头)
+PASS raw 敏感文件 403
+PASS raw 路径穿越 400
+PASS raw 不存在 404
+PASS rename 200 且返回新名
+PASS rename 旧文件消失新文件出现
+PASS rename 空名 400
+PASS rename 语义合法(200/409)
+PASS rename 不存在 404
+PASS delete 200
+PASS delete 文件已删
+PASS delete 不存在 404
+PASS SQLite-only 会话确实只在 SQLite(无 jsonl)
+PASS SQLite-only 出现在 /api/sessions 列表
+PASS SQLite-only rename 200 且新名正确
+PASS SQLite-only rename 后键真迁移(旧0/新3)
+PASS SQLite-only delete 200 且行真清除
+PASS SQLite-only 不存在: delete 404 / rename 404
+PASS SQLite-only 测试数据已清尾(库内0行)
+PASS rename 恶意名被清洗(不落 sessions 外)
+PASS interrupted 列出伪造 ckpt
+PASS resume 无 ckpt 404
+PASS discard 200 且 ckpt 已删
+PASS discard 后 interrupted 不再列出
+PASS interrupted 顺带清掉损坏 ckpt
+ALL PASS
+
+===== Web前端装配防线 =====
+PASS T1 顶层 wiring 非空(抽样: send/stopbtn/newbtn)
+PASS T1 顶层 wiring 引用的 id 全部存在于 HTML
+PASS T1 显式钉住: 退出登录按钮存在于 HTML(鉴权退出路径依赖它)
+PASS T2 所有 $() 引用均有出处(HTML 或 JS 动态创建)
+PASS T3 页面脚本执行不抛异常(整段跑完, 无 null 绑定)
+PASS T3 无 unhandledRejection
+PASS T3 发送按钮绑定了事件
+PASS T3 停止按钮绑定了事件
+PASS T3 新会话按钮绑定了事件
+PASS T3 输入框绑定了键盘事件
+PASS T3 newSession→openSession 真的请求了 history
+PASS T3 退出登录按钮可见(鉴权下 initAuth 显示它)
+PASS T3 注册了全局异常兜底(脚本错误/未处理Promise → 可见提示, 不再静默)
+PASS T4 变异(删发送按钮)被静态检出
+PASS T4 变异(删发送按钮)被动态检出(脚本抛错)
+PASS T5 注入的顶层异常确实让脚本中断
+PASS T5 全局兜底把它渲染成可见提示(不再是静默的'点了没反应')
+
+全部通过 — 前端装配防线有效
+
+===== 分层记忆+断点续跑 =====
+
+== 分层记忆 ==
+  ✓ 双写: MEMORY.md 有两行
+  ✓ 双写: 当天日志存在且带[HH:MM]
+  ✓ recall recent 含日志内容
+  ✓ recall 指定日期
+  ✓ recall 不存在的日期报清晰提示
+  ✓ recall all=长期记忆全文
+  ✓ memory_block 注入且封顶(<=4200字符)
+  ✓ memory_block 标题更新为 memory/ 路径
+  ✓ 迁移: 旧根MEMORY.md 移入 memory/
+
+== checkpoint 生命周期 ==
+  ✓ write→list 可见
+  ✓ 同会话刷新不重复
+  ✓ 损坏ckpt被跳过并清除
+  ✓ clear→list 为空
+
+== run_task 集成(FakeClient) ==
+  ✓ 正常结束返回最终回答
+  ✓ 正常结束 ckpt 已清除
+  ✓ 取消路径返回中断标记
+  ✓ 取消路径 ckpt 已清除
+  ✓ 崩溃残留可发现
+  ✓ ckpt 文件名保留 @(多用户命名空间)
+
+==============================================
+[分层记忆+断点续跑单测] 19/19 通过
+
+===== 登录鉴权+多用户 =====
+PASS 未配置auth: 列表放行
+PASS 未配置auth: me=匿名且auth=false
+PASS setup_auth 开关生效
+PASS 未登录 / → 307 跳登录页
+PASS 未登录 API → 401
+PASS 未登录 chat → 401
+PASS health 保持开放(探针)
+PASS 登录页开放
+PASS 错误密码 401
+PASS 不存在用户 401
+PASS alice 登录成功+发cookie
+PASS me=alice
+PASS 静态 Bearer token 放行
+PASS 错误 Bearer 401
+PASS 伪造cookie 401
+PASS 签名token可验
+PASS 篡改payload被拒
+PASS 篡改签名被拒
+PASS alice 只见自己的 proj
+PASS bob 只见自己的 proj
+PASS alice 打开同名会话 200(解析到 alice@proj)
+PASS alice rename 200
+PASS rename 只动 alice 的文件
+PASS alice delete 200
+PASS delete 只删 alice 的, bob 仍在
+PASS 借道删 legacy 会话 404 且未删
+PASS bob 删自己的 proj 200
+PASS bob 审批 alice 的请求 404(且不消费)
+PASS alice 审批自己的 200
+ALL PASS
+
+===== 平台上下文注入 =====
+PASS 渲染: 标记开头
+PASS 渲染: 页面+key
+PASS 渲染: 品类批次
+PASS 渲染: 空SKU占位
+PASS 渲染: 兜底规则句
+PASS 渲染: 空dict→空串
+PASS 渲染: None→空串
+PASS 渲染: 非dict→空串
+PASS 渲染: 仅无意义键→空串
+PASS 渲染: filters生效且滤空
+PASS 注入: 插在system块后
+PASS 注入: 内容不变不动不落盘
+PASS 注入: 每轮替换同一条
+PASS 注入: 替换只落盘一次
+PASS 注入: 空上下文完全不动
+PASS 注入: 无system时插最前
+PASS 注入: 认得历史里的旧标记并原位替换
+PASS level: write卡片带level=write
+PASS level: external两次确认都external
+[approval] 等待超时(900s), 按拒绝自动解决: id=68bade673faa tool=执行计划 session=t_lvl
+PASS level: plan_request带level=write
+[approval] 等待超时(900s), 按拒绝自动解决: id=b9b642bcf2d7 tool=计划步骤 1/3 session=t_lvl
+PASS level: step_request带level=write
+[approval] 等待超时(900s), 按拒绝自动解决: id=28f5e5e2bcb4 tool=t_to_write session=t_appr_to
+PASS 超时: write工具按拒绝(allow=False)
+PASS 超时: 只推1张卡
+PASS 超时: PENDING已摘除
+PASS 超时: 广播permission_resolved(timeout=True)
+PASS 超时: 记账decision=timeout
+[approval] 等待超时(900s), 按拒绝自动解决: id=e1473e9d66a8 tool=t_to_ext session=t_appr_to_ext
+PASS 超时: external首卡超时即拒不推第二张
+PASS PendingReq默认level=write
+PASS PendingReq可显式传level
+PASS pending清单仅含本会话
+PASS pending项含level字段
+PASS pending level值正确
+PASS pending保留原有id/tool/preview
+PASS 回归: permission_request仍带level
+PASS cors: 空白名单不挂载
+PASS cors: 默认无CORS头
+[cors] 已启用白名单: ['http://localhost:5173']
+PASS cors: 白名单挂载+1
+[cors] 已启用白名单: ['http://localhost:5173']
+PASS cors: 重复配置幂等挂2层(行为=每次调用都挂, 由调用方保证只调一次)
+[dispatch] running seq=1 subs=0
+[work] session=t_ctx_1794884818 plan=False stepwise=False history=1 plat_ctx=True
+[dispatch] running seq=2 subs=0
+PASS chat: 带头(中文URL编码) 200
+PASS chat: plat_ctx 透传为 dict
+PASS chat: history恰1条上下文且含品类批次
+[dispatch] running seq=1 subs=0
+[work] session=t_ctx_1794884818_ascii plan=False stepwise=False history=1 plat_ctx=True
+[dispatch] running seq=2 subs=0
+PASS chat: 裸ASCII JSON直接解析
+[dispatch] running seq=3 subs=0
+[work] session=t_ctx_1794884818 plan=False stepwise=False history=2 plat_ctx=True
+[dispatch] running seq=4 subs=0
+PASS chat: 换头后仍1条且内容更新
+[dispatch] running seq=1 subs=0
+[work] session=t_ctx_1794884818_b plan=False stepwise=False history=1 plat_ctx=False
+[dispatch] running seq=2 subs=0
+PASS chat: 不带头 plat_ctx=None
+[dispatch] running seq=1 subs=0
+[work] session=t_ctx_1794884818_c plan=False stepwise=False history=1 plat_ctx=False
+[dispatch] running seq=2 subs=0
+PASS chat: 非法JSON头不报错
+[dispatch] running seq=1 subs=0
+[work] session=t_ctx_1794884818_p plan=True stepwise=False history=1 plat_ctx=True
+[dispatch] running seq=2 subs=0
+PASS chat: plan模式透传 plat_ctx
+
+== 全部通过 ==
+
+===== 平台只读工具 =====
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+PASS 契约: 10个platform_*齐全
+PASS 契约: 全部 level=read
+PASS 契约: 原有8个workmain工具保留
+PASS 契约: platform_root 从 config 读取
+PASS 脱敏: 中文敏感键剔除
+PASS 脱敏: 英文敏感键剔除
+PASS 脱敏: 业务键保留
+PASS 脱敏: 嵌套list内键剔除
+PASS 脱敏: 11位手机号掩码
+PASS 脱敏: 非11位手机号形状不掩码
+PASS 脱敏: 非字符串标量原样
+PASS 脱敏T07: 新词典命中键全剔
+PASS 脱敏T07: 新词典嵌套list内也剔
+PASS 脱敏T07: 零误伤守卫(合法业务键全保留)
+PASS 纪律T07: 词典无裸 name
+PASS 纪律T07: 词典 57 条且无重复
+PASS 渲染: 标量键值
+PASS 渲染: None显示—
+PASS 渲染: 嵌套dict缩进
+PASS 渲染: list条目
+PASS 渲染: budget截断
+PASS trust_env: session.trust_env=False
+PASS 降级: 10个工具已注册
+PASS 降级: platform_batches 返回人话文本
+PASS 降级: platform_batches 带降级指引
+PASS 降级: platform_batches 不把底层堆栈丢给用户
+PASS 降级: platform_overview 返回人话文本
+PASS 降级: platform_overview 带降级指引
+PASS 降级: platform_overview 不把底层堆栈丢给用户
+PASS 降级: platform_sku_route 返回人话文本
+PASS 降级: platform_sku_route 带降级指引
+PASS 降级: platform_sku_route 不把底层堆栈丢给用户
+PASS 降级: platform_alerts 返回人话文本
+PASS 降级: platform_alerts 带降级指引
+PASS 降级: platform_alerts 不把底层堆栈丢给用户
+PASS 降级: platform_transport 返回人话文本
+PASS 降级: platform_transport 带降级指引
+PASS 降级: platform_transport 不把底层堆栈丢给用户
+PASS 降级: platform_records 返回人话文本
+PASS 降级: platform_records 带降级指引
+PASS 降级: platform_records 不把底层堆栈丢给用户
+PASS 降级: platform_inflight_overview 返回人话文本
+PASS 降级: platform_inflight_overview 带降级指引
+PASS 降级: platform_inflight_overview 不把底层堆栈丢给用户
+PASS 降级: platform_inflight_alerts 返回人话文本
+PASS 降级: platform_inflight_alerts 带降级指引
+PASS 降级: platform_inflight_alerts 不把底层堆栈丢给用户
+PASS 降级: platform_daily_report 返回人话文本
+PASS 降级: platform_daily_report 带降级指引
+PASS 降级: platform_daily_report 不把底层堆栈丢给用户
+PASS 降级: platform_deltas 返回人话文本
+PASS 降级: platform_deltas 带降级指引
+PASS 降级: platform_deltas 不把底层堆栈丢给用户
+SKIP 真实联动: 平台后端未启动(仅离线用例已覆盖)
+
+== 全部通过 ==
+
+===== 事中日报本地只读 =====
+PASS 契约: inflight_report 已注册
+PASS 契约: level=read(自动放行, 无人值守链路可用)
+PASS 契约: workmain 工具数 9 基础 + 10 平台 + 1 趋势 = 20
+PASS 契约: line 枚举仅手机膜/手机壳(路径逃逸防线)
+PASS 契约: date 可选(required 为空)
+PASS 契约: 描述含口径注(segment vs Part 双口径提醒)
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+PASS 无人值守: inflight_report 在只读名单
+PASS 无人值守: run_route_check 仍在写级名单(对照)
+PASS 真实: 首行是标题而非表头(header=2 生效)
+PASS 真实: 含「在研状态总表」节
+PASS 真实: 含「超期明细」节
+PASS 真实: 含「风险预警」节
+PASS 真实: 含「异常上报」节
+PASS 真实: 含「豁免备查」节
+PASS 真实: 口径注必现(引用须注明来源)
+PASS 真实: 来源行带文件名
+PASS 真实: 长度受 clip 控制
+PASS 真实: 未被截断(尾部豁免节在)
+PASS 人工登记: 备注按SKU带入输出
+PASS 脱敏红线: 表内至少取到1个责任人真名(测试前提)
+PASS 脱敏红线: 输出不含任何责任人真名
+PASS 脱敏红线: 输出不含豁免原因原文
+PASS 脱敏红线: 输出不含完整11位手机号
+PASS 脱敏红线: 豁免节明确不返回原因
+PASS date: 连字符形式命中 20261014
+PASS date: 紧凑形式命中同一文件
+PASS date: 不存在的日期 → 人话错误+可用清单
+PASS date: 非法形式 → 人话错误
+PASS 安全: line 路径逃逸被拒
+PASS 降级: 品类无日报目录 → 人话错误不抛异常
+PASS 品类: 手机壳可读(默认最新)
+PASS 改名: 默认取最新 → _HHMMSS 后缀那份(旧正式名不得赢)
+PASS 改名: date=2026-10-20 → 同取后缀新份
+PASS 改名: date=20261019 → 前一天正式名(后缀不串门)
+PASS 改名: 不同日期不得按 mtime 误取(日期是第一排序键)
+
+== 全部通过 ==
+
+===== Web渲染器 =====
+PASS 标题
+PASS 粗体
+PASS 斜体
+PASS 行内码
+PASS 列表
+PASS 表格
+PASS 代码块语言头
+PASS 代码块内容转义
+PASS 正文脚本转义
+PASS 代码块内脚本转义
+PASS 未闭合围栏不崩溃
+PASS 多行段落合并
+PASS 引用多行合并
+PASS 链接
+PASS 空输入
+PASS 有序列表
+PASS 产物识别正则在位
+PASS 预览抽屉接入
+ALL PASS
+
+===== 企业化三件套单测 =====
+[单测] 存储/熔断/限流/遥测
+  PASS  SQLite会话往返+悬空修复
+  PASS  clear后为空
+  PASS  旧JSONL回退读取
+  PASS  连续失败触发熔断(快速失败)
+  PASS  冷却后半开恢复
+  PASS  超限快速失败(有界等待)
+  PASS  tasks表落库
+  PASS  llm_calls表落库(带时延)
+  PASS  tool_calls成败落库
+  PASS  审批审计落库(含附注)
+  PASS  q_metrics汇总
+[test_enterprise] 通过 11 项, 失败 0 项
+
+===== RAG检索质量 =====
+[评测] 检索级 recall@5 (BM25+向量+RRF, 无重排)
+[rag] 加载本地嵌入模型 BAAI/bge-small-zh-v1.5 (目录 D:\dev-cache\fastembed\bge-small-zh-v1.5)...
+   HIT  新品售前全流程的红线是多少自然日  向量参与:True
+   HIT  Part8 渠道仓到货环节的时效目标是几天  向量参与:True
+   HIT  路线复盘系统口径和动作口径怎么选  向量参与:True
+   HIT  审批编号为什么要按文本处理  向量参与:True
+   HIT  素材寄送拍摄到加工完成的目标是多少天  向量参与:True
+  PASS  recall@5 = 5/5
+[评测] 语义泛化(查询不含任何关键词)
+  PASS  语义查询top1命中权威文档
+  PASS  top1文本含目标事实
+  PASS  向量路参与召回(bm25词面完全不匹配)
+[评测] 降级: 向量路禁用(模拟无嵌入)
+  PASS  纯BM25降级仍可用
+  PASS  索引规模合理(4546块/向量启用)
+[test_rag] 通过 6 项, 失败 0 项
+
+===== RAG本地嵌入后端 =====
+  PASS  默认后端=local
+  PASS  配置 remote 生效
+  PASS  backend 大小写不敏感
+  PASS  local 默认模型=bge-small-zh
+  PASS  local 自定义模型生效
+  PASS  remote 默认模型=embedding-3
+  PASS  默认分发到 local
+  PASS  remote 分发到 remote
+[rag] 本地嵌入不可用: 缺 fastembed (pip install fastembed)
+  PASS  缺 fastembed → None 降级  [None]
+[rag] 加载本地嵌入模型 BAAI/bge-small-zh-v1.5 (目录 D:\dev-cache\fastembed\bge-small-zh-v1.5)...
+  PASS  本地嵌入返回向量  [[[0.1, 0.2], [0.1, 0.2]]]
+  PASS  模型单例(只构造1次)  [1]
+  PASS  D盘缓存目录生效  [D:\dev-cache\fastembed]
+  PASS  remote→local 视为不兼容(需重建)  [维度 2048→512]
+  PASS  同后端同模型视为兼容
+  PASS  繁化: 口语查询命中意图被扩展  [新品从拿到手机数据到全部到货最慢允许多久 全流程 整条链路 开发总周期 红线 自然日 上限 全流程汇]
+  PASS  繁化: 原词面完整保留(不稀释精确查询)
+  PASS  繁化: 不注入答案数字(60/15/13防造假)
+  PASS  繁化: 注入规范语义锚点
+  PASS  繁化: 开关关闭时原样返回
+  PASS  繁化: 无关查询不误触发
+  PASS  繁化: 截断上限生效
+[rag] 达到文件上限10, 截断(按模式轮询, 各源均衡覆盖)
+  PASS  轮询采集: 少量高价值源不被截断饿死  [权威源 3/3, 共采集 10]
+
+[test_rag_local_embed] 通过 22 项, 失败 0 项
+
+===== LLM Wiki编译旁路 =====
+  PASS  编译产出概念页(>20)
+  PASS  编译覆盖权威源(=5)
+  PASS  产物齐全(index/pages/index.md/manifest/log)
+  PASS  编译幂等: 页数不变
+  PASS  编译幂等: 每页内容hash不变
+  PASS  只读源: 源文件未被修改
+  PASS  固化别名不含答案数字
+  PASS  红线查询top1命中开发总周期页
+  PASS  红线查询top1事实可见(含60)
+  PASS  Part8查询top1命中Part8页
+  PASS  Part8查询top1事实可见(含15)
+  PASS  口语语义查询能命中全流程页
+  PASS  lint 基线无问题
+  PASS  lint 检出源漂移
+  PASS  旁路: 源码不 import rag
+[test_knowledge_wiki] 通过 15 项, 失败 0 项
+
+===== 口径漂移体检 =====
+
+[查一 值漂移]
+  ✓ 一致时无漂移
+  ✓ 值被偷改能报出
+  ✓ Part1 13vs75 已知差异不误报
+  ✓ 壳基线 Part1=75 不误报
+  ✓ 壳用膜值会被判漂移
+  ✓ 非数字值报可疑
+  ✓ 缺 Part 不算漂移
+
+[查二 来源静默回退]
+  ✓ 全 snapshot 来源一致
+  ✓ 静默回退能抓(光比数值抓不到)
+  ✓ snapshot 不可用时跳过来源查
+  ✓ 壳 Part1 来源豁免
+  ✓ xlsx 作为合法次级来源也报(真源可用)
+
+[查三 hash 漂移]
+  ✓ 首次无基线不报
+  ✓ hash 一致不报
+  ✓ 文件被改能报出
+  ✓ 新增文件也提示
+
+[汇总判定]
+  ✓ 全一致 → OK
+  ✓ 有漂移 → DRIFT
+  ✓ 横幅含旧值→新值
+
+[接入守卫 enforce_drift_guard]
+  ✓ 无横幅不动
+  ✓ 非⛔不动
+  ✓ 有横幅替换⑥
+  ✓ 保留①及之前
+  ✓ 保留⑥标题
+
+[探针降级]
+  ✓ 真源缺失不抛异常
+  ✓ 降级留痕
+  ✓ 真源缺失不写空基线
+
+[test_drift_check] 通过 27 项, 失败 0 项
+
+===== 任务契约四件套 =====
+[1] spec 结构化输出约定
+  PASS format_spec 渲染字段
+  PASS 空 spec 不产生文本
+  PASS spec 拼进本轮任务文本
+  PASS spec 不进 system
+[2] output_parser 确定性后处理
+  PASS parser 结果即返回值
+  PASS task_end 带的是后处理后的答案
+  [输出后处理失败, 用原答案] RuntimeError: 故意失败
+  PASS parser 抛异常时原样返回
+  PASS parser 抛异常仍然正常收尾
+  PASS parser 返回空白视为无效, 保留原文
+[3] warnings 完成度账本
+  PASS warnings 通过 warning 事件上抛
+  [警告] x
+  [警告] x
+  PASS _warn 去重
+[4] 技能包: 索引 + 按需加载
+  PASS 索引里有 2 个技能: ['review_sku', 'sku_triage']
+  PASS load_skill 返回正文
+  PASS load_skill 未知名字给人话错误
+  PASS 系统提示只装索引不装正文
+  PASS 索引措辞是「命中即读」而非「不要预先加载」
+  PASS 索引说明凭经验答会漏掉口径纪律
+[5] 全局数据纪律
+  PASS 系统提示含人名/编号纪律
+  PASS 明确禁止编造姓名
+  PASS 要求指人写岗位而非姓名
+
+全部通过
+
+===== 失败兜底文本 =====
+
+== 同步目录为空 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  pipeline_alerts: 报错但给出下一步
+  PASS  pipeline_alerts: 明确禁止拿历史数据冒充今天
+  PASS  pipeline_alerts: 指向 sync_status / inflight_report 之一
+  PASS  scan_sync_data: 报错但给出下一步
+  PASS  scan_sync_data: 明确禁止拿历史数据冒充今天
+  PASS  scan_sync_data: 指向 sync_status / inflight_report 之一
+
+== 商品资料缺失 ==
+  PASS  文案说明是文件不存在
+  PASS  指向 workmain_root 配置
+  PASS  不猜 SKU 信息
+
+== 口径对照 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  pipeline_alerts: 有口径对照行
+  PASS  pipeline_alerts: 点名另一个工具 inflight_report
+  PASS  pipeline_alerts: 禁止替代/相加/混用
+  PASS  inflight_report: 有口径对照行
+  PASS  inflight_report: 点名另一个工具 pipeline_alerts
+  PASS  inflight_report: 禁止替代/相加/混用
+
+== 不把堆栈丢给用户 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  不含 HTTPConnectionPool
+  PASS  不含 Max retries
+  PASS  不含 Traceback
+  PASS  不含 urllib3
+  PASS  给了降级指引
+
+== 工具名写错 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  提示未注册
+  PASS  列出可用工具
+
+==============================================
+[兜底文本单测] 22/22 通过
+
+===== 流程趋势工具 =====
+
+== 基本结构 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  有标题行
+  PASS  有表头(日期/在研/超期/进行中)
+  PASS  有数据行
+  PASS  有区间对比
+  PASS  带口径声明(segment vs Part)
+  PASS  说明缺行不是 0
+
+== 变化列 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  首行变化为 —
+  PASS  每行变化 = 超期数之差
+
+== 缺日不是 0 ==
+  PASS  能找到日报文件(测试前提)
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  有数据行
+  PASS  表里每一行都有对应日报(没有凭空补的行)
+  PASS  有日报的日期都在表里(没被静默丢行)
+  PASS  没有 0/0/0 的填充行
+
+== days 边界 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  days=1 被抬到 2
+  PASS  days=999 被压到 60
+
+== 周对比结论行 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  有「最近N份 vs 前N份」行
+  PASS  按份数切(说明避开缺日错位)
+  PASS  均值与差值格式正确
+  PASS  差值 ≈ 后段均值 - 前段均值
+  PASS  带峰值日期
+  PASS  给出最新一份的数
+  PASS  说明怎么引用
+
+== 非法品类 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  不抛异常, 返回错误文本
+  PASS  错误带下一步
+
+== 空列省略 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  PASS  表头不含预警列
+  PASS  有说明不是 0
+
+==============================================
+[趋势工具单测] 26/26 通过
+
+===== 评测集防线 =====
+== 套件规模 ==
+  ✓ redline 至少 5 条
+  ✓ 全部用例 id 唯一
+
+== 每条 redline 的定义 ==
+  ✓ rl_fetch_first: 有 origin(能追溯到事故)
+  ✓ rl_fetch_first: 有 mock_tools(否则数字断言不稳定)
+  ✓ rl_fetch_first: 有工具断言
+  ✓ rl_fetch_first: 有答案断言
+  ✓ rl_no_fake_names: 有 origin(能追溯到事故)
+  ✓ rl_no_fake_names: 有 mock_tools(否则数字断言不稳定)
+  ✓ rl_no_fake_names: 有工具断言
+  ✓ rl_no_fake_names: 有答案断言
+  ✓ rl_caliber_gloss: 有 origin(能追溯到事故)
+  ✓ rl_caliber_gloss: 有 mock_tools(否则数字断言不稳定)
+  ✓ rl_caliber_gloss: 有工具断言
+  ✓ rl_caliber_gloss: 有答案断言
+  ✓ rl_trend_quote: 有 origin(能追溯到事故)
+  ✓ rl_trend_quote: 有 mock_tools(否则数字断言不稳定)
+  ✓ rl_trend_quote: 有工具断言
+  ✓ rl_trend_quote: 有答案断言
+  ✓ rl_skill_loaded: 有 origin(能追溯到事故)
+  ✓ rl_skill_loaded: 有 mock_tools(否则数字断言不稳定)
+  ✓ rl_skill_loaded: 有工具断言
+  ✓ rl_skill_loaded: 有答案断言
+
+== 快照可用 ==
+  ✓ 快照 pipeline_alerts_20261029.txt
+  ✓ 快照 inflight_report_20261029.txt
+  ✓ 快照 pipeline_alerts_20261029.txt
+  ✓ 快照 inflight_report_20261029.txt
+  ✓ 快照 scan_sync_data_20261029.txt
+  ✓ 快照 pipeline_alerts_20261029.txt
+  ✓ 快照 inflight_report_20261029.txt
+  ✓ 快照 pipeline_trend_20261029.txt
+  ✓ 快照 pipeline_alerts_20261029.txt
+  ✓ 快照 inflight_report_20261029.txt
+
+== 断言与快照自洽 ==
+  ✓ rl_fetch_first: 快照里没有 'G531'
+  ✓ rl_fetch_first: 快照里没有 'G532'
+  ✓ rl_fetch_first: 快照里没有 'G533'
+  ✓ rl_no_fake_names: 快照里至少一个可达 ['岗位', '环节', '责任人', '负责人', '采购', '签样', '仓储', '运营', '后勤', '产品']
+  ✓ rl_no_fake_names: 快照里没有 '周奕奕'
+  ✓ rl_no_fake_names: 快照里没有 '林惠欢'
+  ✓ rl_no_fake_names: 快照里没有 '张三'
+  ✓ rl_no_fake_names: 快照里没有 '李四'
+  ✓ rl_no_fake_names: 快照里没有 '王五'
+  ✓ rl_caliber_gloss: 快照里至少一个可达 ['口径', '全流程', '事中跟踪', '在研', '来源', '平台']
+  ✓ rl_trend_quote: 快照里有 '3.4'
+  ✓ rl_skill_loaded: 快照里至少一个可达 ['剔除', '暂缓', '不弄', '排除', '先不处理', '搁置']
+
+== 工具名有效 ==
+[插件] knowledge_wiki: 注册 0 个工具
+[插件] rag: 注册 3 个工具
+[插件] workmain: 注册 19 个工具
+  ✓ rl_fetch_first: 工具 pipeline_alerts 存在
+  ✓ rl_fetch_first: 工具 inflight_report 存在
+  ✓ rl_no_fake_names: 工具 pipeline_alerts 存在
+  ✓ rl_no_fake_names: 工具 inflight_report 存在
+  ✓ rl_no_fake_names: 工具 scan_sync_data 存在
+  ✓ rl_caliber_gloss: 工具 pipeline_alerts 存在
+  ✓ rl_caliber_gloss: 工具 inflight_report 存在
+  ✓ rl_trend_quote: 工具 pipeline_trend 存在
+  ✓ rl_skill_loaded: 工具 pipeline_alerts 存在
+  ✓ rl_skill_loaded: 工具 inflight_report 存在
+
+== strict 隔离生效 ==
+  ✓ 至少一条用例用 strict(高风险场景)
+  ✓ rl_no_fake_names: strict 下无未 mock 的业务工具
+  ✓ rl_no_fake_names: strict 下 mock 工具都在
+  ✓ rl_skill_loaded: strict 下无未 mock 的业务工具
+  ✓ rl_skill_loaded: strict 下 mock 工具都在
+
+== 覆盖事故 ==
+  ✓ 覆盖: 跳过取数
+  ✓ 覆盖: 编造人名
+  ✓ 覆盖: 口径混说
+  ✓ 覆盖: 自切区间
+  ✓ 覆盖: 技能不加载
+
+[评测集防线] 64/64 通过
+
+==============================================
+[总览] tier=fast  通过 34/34  用时 131.9s
+  PASS  内核自检 (1.5s)
+  PASS  反思闭环单测 (1.6s)
+  PASS  多轮增强单测 (0.7s)
+  PASS  高级能力单测 (1.7s)
+  PASS  安全拦截单测 (0.5s)
+  PASS  人工干预三件套 (2.8s)
+  PASS  research防幻觉防线 (0.4s)
+  PASS  数据新鲜度防线 (26.8s)
+  PASS  数据新鲜度三态守卫 (0.5s)
+  PASS  联合监听内核 (0.9s)
+  PASS  T1增量脉冲 (1.0s)
+  PASS  失败模式复盘单测 (2.4s)
+  PASS  空简报防线 (14.9s)
+  PASS  简报格式兜底 (0.7s)
+  PASS  Part环节名/素材通用 (9.4s)
+  PASS  环节目标单一真源 (3.5s)
+  PASS  钉钉推送换行/分片 (0.5s)
+  PASS  Web新增端点 (3.2s)
+  PASS  Web前端装配防线 (0.8s)
+  PASS  分层记忆+断点续跑 (0.6s)
+  PASS  登录鉴权+多用户 (2.3s)
+  PASS  平台上下文注入 (2.5s)
+  PASS  平台只读工具 (23.1s)
+  PASS  事中日报本地只读 (1.7s)
+  PASS  Web渲染器 (0.3s)
+  PASS  企业化三件套单测 (1.7s)
+  PASS  RAG检索质量 (7.6s)
+  PASS  RAG本地嵌入后端 (0.7s)
+  PASS  LLM Wiki编译旁路 (1.1s)
+  PASS  口径漂移体检 (0.5s)
+  PASS  任务契约四件套 (1.0s)
+  PASS  失败兜底文本 (5.3s)
+  PASS  流程趋势工具 (8.8s)
+  PASS  评测集防线 (0.6s)
+[提示] 手动用例清单见 tests/TESTCASES.md

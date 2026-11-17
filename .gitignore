@@ -18,6 +18,8 @@ agent.db*
 # 实时监听自己的事件库（运行时数据，可重建；源库在 work-main 下，不在此仓库）
 watch/watch.db*
 watch/_probe*.db*
+# 口径漂移体检的 hash 基线（运行时状态，可重建；首次运行自动生成）
+drift_baseline.json
 # P1 探针运行报告（含实例 ID 与时间，本地证据不入库）
 scripts/_p1_probe*.json
 # fast 回归临时抓取文件（正式归档在 docs/test_reports/）

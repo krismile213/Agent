@@ -730,6 +730,25 @@ def enforce_freshness_guard(md: str, tool_out: str) -> tuple:
     return md[:m.end()] + "\n\n" + notice + "\n\n" + md[end:], True
 
 
+def enforce_drift_guard(md: str, banner: str) -> tuple:
+    """口径漂移时把 ⑥ 替换为暂缓提示 —— 与新鲜度守卫同构的确定性收尾。
+
+    banner 由 drift_probe.guard_banner() 产出(⛔ 前缀 + 哪一层漂移/旧值→新值)。
+    传空串=无漂移, 不动正文。与 freshness 守卫一样放 finish() 最后, 覆盖前面重写。
+    """
+    if not banner or not banner.startswith("⛔"):
+        return md, False
+    m = re.search(rf"^#{{2,4}}\s*⑥.*$", md or "", re.M)
+    if not m:
+        return md, False
+    tail = md[m.end():]
+    m2 = re.search(r"^#{2,4}\s*[①②③④⑤]", tail, re.M)
+    end = m.end() + (m2.start() if m2 else len(tail))
+    notice = ("• 口径存疑, 本轮暂不催办 —— " + banner
+              + "。请复核真源后再决定是否催办。")
+    return md[:m.end()] + "\n\n" + notice + "\n\n" + md[end:], True
+
+
 def drop_ghost_skus(md: str, tool_out: str) -> tuple:
     """删掉 ⑥ 里引用了「工具输出中不存在的 SKU」的条目 —— 编造残留的兜底。
 
@@ -1179,12 +1198,24 @@ def main():
         except Exception as e:                      # noqa: BLE001
             print(f"[{tag}] ⑥ 数量校正跳过: {e}")
         # 数据新鲜度禁催: 放最后, 覆盖前面所有重写; blocked 时 ⑥ 整段换提示。
+        gated = False
         try:
             md, gated = enforce_freshness_guard(md, tool_out)
             if gated:
                 print(f"[{tag}] ⑥ 数据新鲜度禁催: 已替换为暂缓提示")
         except Exception as e:                      # noqa: BLE001
             print(f"[{tag}] 新鲜度禁催跳过: {e}")
+        # 口径漂移禁催: 与新鲜度同构的最后一道关卡。两者都命中时, 新鲜度优先
+        # (它更贴近"数据在不在"这个前提), 避免 ⑥ 出现两条互相覆盖的暂缓提示。
+        if not gated:
+            try:
+                import drift_probe
+                banner = drift_probe.guard_banner(line="手机膜")
+                md, dgated = enforce_drift_guard(md, banner)
+                if dgated:
+                    print(f"[{tag}] ⑥ 口径漂移禁催: 已替换为暂缓提示")
+            except Exception as e:                  # noqa: BLE001
+                print(f"[{tag}] 口径漂移体检跳过: {e}")
         return md
 
     transcript = core.Transcript(f"brief_{now.strftime('%Y%m%d')}{suffix}")
