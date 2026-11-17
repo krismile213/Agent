@@ -52,6 +52,7 @@ FAST = [
     ("企业化三件套单测", [sys.executable, "scripts/test_enterprise.py", "--unit-only"]),
     ("RAG检索质量", [sys.executable, "scripts/test_rag.py"]),
     ("RAG本地嵌入后端", [sys.executable, "scripts/test_rag_local_embed.py"]),
+    ("LLM Wiki编译旁路", [sys.executable, "scripts/test_knowledge_wiki.py"]),
     ("任务契约四件套", [sys.executable, "scripts/test_task_contract.py"]),
     ("失败兜底文本", [sys.executable, "scripts/test_fallback.py"]),
     ("流程趋势工具", [sys.executable, "scripts/test_trend.py"]),
